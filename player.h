@@ -20,7 +20,10 @@ public:
     int getHp()const{return hp;}
     int getGold(){return gold;}
     int getLevel(){return level;}
+    int getExp() const { return exp; }
+    int getExpToNextLevel() const { return expToNextLevel; }
     int getPopulationCap()const;
+    void restoreState(int newHp, int newGold, int newLevel, int newExp, int newExpToNextLevel);
 
 
 private:

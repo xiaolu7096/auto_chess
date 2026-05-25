@@ -56,7 +56,7 @@ public:
     Garen(Owner _owner=Owner::PlayerCtrl):Unit(450,35,1,60,_owner){
         name="Garen";
         cost=1;
-        traits.push_back("Warrior");
+        traits.push_back("Vanguard");
     }
     //大招：旋风斩
     void castSkill(GameManager*gameMgr) override{

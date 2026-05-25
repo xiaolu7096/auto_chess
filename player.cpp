@@ -1,58 +1,62 @@
-#include"player.h"
-#include<iostream>
-#include<algorithm>
+#include "player.h"
 
+#include <algorithm>
 
 Player::Player() {
-    // TODO: 初始化数值
-    //
-    hp=100;
-    gold=10;
-    level=5;
-    exp=0;
-    expToNextLevel=4;
+    // 玩家资源初始化：100 血、10 金币、3 人口起步。
+    hp = 100;
+    gold = 10;
+    level = 3;
+    exp = 0;
+    expToNextLevel = 4;
 }
-Player::~Player(){
 
+Player::~Player() {
 }
+
 void Player::addGold(int amount) {
-    // TODO: 增加金币
-    gold+=amount;
+    // 战斗奖励、失败补偿等都会通过这里增加金币。
+    gold += amount;
 }
 
 bool Player::spendGold(int amount) {
-    // TODO: 如果 gold >= amount，扣除金币并返回 true
-    // 否则返回 false（提示：这在后面买英雄时非常有用）
-    if(gold>=amount){
-        gold-=amount;
+    // 统一消费入口：金币足够才扣除，避免商店和升级各写一套判断。
+    if (gold >= amount) {
+        gold -= amount;
         return true;
-    }else{
-        return false;
     }
+    return false;
 }
 
 void Player::takeDamage(int damage) {
-    // TODO: 扣除血量，使用 std::max(0, hp - damage) 确保不为负数
-    hp=std::max(0,hp-damage);//max,min函数在有底线的数值计算非常方便
+    // 扣除基地血量，并保证不会低于 0。
+    hp = std::max(0, hp - damage);
 }
 
 void Player::addXP(int amount) {
-    // TODO: 增加 exp，然后调用 checkLevelUp()
-    exp+=amount;
+    // 增加经验后立刻检查是否升级。
+    exp += amount;
     checkLevelUp();
 }
 
 int Player::getPopulationCap() const {
-    // TODO: 根据等级返回人口上限
-    // 简单的逻辑可以是：人口上限 = 当前等级
-
+    // 当前版本采用“等级 = 人口上限”的简单规则。
     return level;
 }
 
+void Player::restoreState(int newHp, int newGold, int newLevel, int newExp, int newExpToNextLevel) {
+    // 读档时直接恢复玩家资源，避免通过 add/spend 触发额外逻辑。
+    hp = newHp;
+    gold = newGold;
+    level = newLevel;
+    exp = newExp;
+    expToNextLevel = newExpToNextLevel;
+}
+
 void Player::checkLevelUp() {
-    // TODO: 这是一个循环逻辑
-    while(exp>=expToNextLevel){
-        exp-=expToNextLevel;
+    // 支持一次获得大量经验时连续升级。
+    while (exp >= expToNextLevel) {
+        exp -= expToNextLevel;
         level++;
     }
 }

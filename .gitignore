@@ -1,0 +1,14 @@
+# 忽略 Qt Creator 个人本地配置文件
+*.user
+*.user.*
+.qtcreator/
+
+# 忽略所有编译输出文件夹
+build/
+Build/
+*build*/
+
+# 忽略临时文件与可执行程序
+*.o
+*.obj
+*.exe

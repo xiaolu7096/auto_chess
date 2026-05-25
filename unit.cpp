@@ -1,67 +1,59 @@
 #include "unit.h"
-#include"gamemanager.h"
-#include <algorithm> // 用于使用 std::max 和 std::min
+#include "gamemanager.h"
 
-// 构造函数的实现
+#include <algorithm>
+#include <queue>
+
 Unit::Unit(int _hp, int _atk, int _range, int _maxMana, Owner _owner)
     : hp(_hp), maxHp(_hp), atk(_atk), range(_range),
-    mana(0), maxMana(_maxMana), owner(_owner)
+      mana(0), maxMana(_maxMana), owner(_owner)
 {
-    // 默认初始位置设为非法值，等待 GameManager 分配
+    // 单位刚创建时还没有真实位置，由 GameManager 放入棋盘或备战区。
     x = -1;
     y = -1;
-    isBench = true; // 默认先放在备战区
-    // ✨ 初始化状态机和默认计时器数值
+    isBench = true;
+
+    // 战斗状态机默认从空闲开始，等待每帧 updateAction 驱动。
     state = UnitState::Idle;
     target = nullptr;
 
-    attackInterval = 30; // 默认 30 帧（1秒）普攻一次
+    // 以 30ms 左右一帧估算：30 帧攻击一次，20 帧移动一格。
+    attackInterval = 30;
     attackTimer = 0;
-
-    moveInterval = 20;   // 默认 20 帧（约0.6秒）移动一格
+    moveInterval = 20;
     moveTimer = 0;
 }
 
 Unit::~Unit() {
-    // 阶段一暂不需要复杂的清理工作
+    // 装备对象由装备栏/掉落系统持有；Unit 本身不额外释放外部资源。
 }
 
-// --- TODO: 请你完成以下函数的具体逻辑 ---
-
 bool Unit::isAlive() const {
-    // TODO: 返回 hp 是否大于 0
-    if(hp>0){
-        return true;
-    }else{
-        return false;
-    }
+    // 生命值大于 0 才视为存活。
+    return hp > 0;
 }
 
 void Unit::takeDamage(int damage) {
-    // TODO: 减去伤害值
-    // 提示：hp = std::max(0, hp - damage);
-    hp=std::max(0,hp-damage);
+    // 扣除伤害，并保证生命值不会低于 0。
+    hp = std::max(0, hp - damage);
 }
 
 void Unit::addMana(int amount) {
-    // TODO: 增加法力值，但不能超过 maxMana
-    // 提示：mana = std::min(maxMana, mana + amount);
-    mana=std::min(maxMana,mana+amount);
+    // 增加法力，并保证不会超过最大法力值。
+    mana = std::min(maxMana, mana + amount);
 }
-// --- 每帧的核心分发机制 ---
+
 void Unit::updateAction(GameManager* gameMgr) {
-    // 如果已经死亡，不执行任何 AI 逻辑
+    // 每一帧由 GameManager 调用，根据当前状态分发到具体行为。
     if (state == UnitState::Dead || !isAlive()) {
         state = UnitState::Dead;
         return;
     }
 
-    // 每一帧，技能蓝量判定拥有最高优先级
     if (mana >= maxMana && maxMana > 0) {
         state = UnitState::Casting;
     }
 
-    // 状态机行为分发
     switch (state) {
     case UnitState::Idle:
         handleIdle(gameMgr);
@@ -79,183 +71,194 @@ void Unit::updateAction(GameManager* gameMgr) {
         break;
     }
 }
-void Unit::handleIdle(GameManager* gameMgr) {
-    // TODO 任务 A: 寻找最近的敌人。
-    // 提示：现在先留空，下一关我们将在此调用索敌算法。
-    // 如果找到了目标，且目标在攻击范围内 -> 切换到 Attacking 状态
-    // 如果找到了目标，但目标太远够不着     -> 切换到 Moving 状态
-    Unit* bestTarget = nullptr;
-    int bestDistSq = 999999; // 先设一个很大的初始距离平方值
 
-    // 1. 遍历 8x8 棋盘寻找所有潜在敌人
+void Unit::handleIdle(GameManager* gameMgr) {
+    // 空闲状态负责索敌：找最近敌人，距离相同则按血量、坐标稳定决策。
+    Unit* bestTarget = nullptr;
+    int bestDistSq = 999999;
+
     for (int i = 0; i < 8; i++) {
         for (int j = 0; j < 8; j++) {
-            Unit* potential = gameMgr->getUnitOnBoard(i,j);
+            Unit* potential = gameMgr->getUnitOnBoard(i, j);
+            if (!potential || potential->owner == owner || !potential->isAlive()) {
+                continue;
+            }
 
-            // 必须是对面阵营，且必须活着
-            if (potential && potential->owner != this->owner && potential->isAlive()) {
+            int dx = potential->x - x;
+            int dy = potential->y - y;
+            int distSq = dx * dx + dy * dy;
 
-                // 计算距离平方: dx^2 + dy^2
-                int dx = potential->x - this->x;
-                int dy = potential->y - this->y;
-                int distSq = dx * dx + dy * dy;
-
-                if (bestTarget == nullptr) {
-                    // 第一个找到的敌人，先无条件作为临时最优目标
-                    bestTarget = potential;
-                    bestDistSq = distSq;
+            bool better = bestTarget == nullptr || distSq < bestDistSq;
+            if (!better && distSq == bestDistSq) {
+                if (potential->hp != bestTarget->hp) {
+                    better = potential->hp > bestTarget->hp;
+                } else if (potential->x != bestTarget->x) {
+                    better = potential->x < bestTarget->x;
+                } else {
+                    better = potential->y > bestTarget->y;
                 }
-                else if (distSq < bestDistSq) {
-                    // 情况一：发现距离更近的敌人，直接换人
-                    bestTarget = potential;
-                    bestDistSq = distSq;
-                }
-                else if (distSq == bestDistSq) {
-                    // 情况二：距离居然一样近！触发规则决胜
+            }
 
-                    // 👑 【TODO 任务 E】: 实现决胜判定
-                    // 规则 1：优先生命值高低 (potential->hp > bestTarget->hp)
-                    // 规则 2：若血量也相同，从左向右 (potential->x < bestTarget->x)
-                    // 规则 3：若 X 也相同，从下到上 (potential->y > bestTarget->y)
-                    //
-                    // 请在下方完善 if 判定，决定是否要将 bestTarget 替换为 potential：
-                    if (potential->hp != bestTarget->hp) {
-                        if (potential->hp > bestTarget->hp) {
-                            bestTarget = potential; // 优先生命值高的
-                        }
-                    } else if (potential->x != bestTarget->x) {
-                        if (potential->x < bestTarget->x) {
-                            bestTarget = potential;
-                        }
-                    } else if (potential->y > bestTarget->y) {
-                        bestTarget = potential;
-                    }
-                }
+            if (better) {
+                bestTarget = potential;
+                bestDistSq = distSq;
             }
         }
     }
 
-    // 2. 检查最终索敌结果，决定下一阶段去干嘛
-    if (bestTarget != nullptr) {
-        this->target = bestTarget;
+    if (!bestTarget) {
+        return;
+    }
 
-        // 判断目标是否在我的射程之内
-        // 提示：我们的攻击距离 range 也是逻辑格子数。如果距离平方 <= 射程的平方，说明够得着！
-        if (bestDistSq <= this->range * this->range) {
-            this->state = UnitState::Attacking;
-            this->attackTimer = 0; // 锁定目标后可以立刻尝试出手
-        } else {
-            this->state = UnitState::Moving;
-            this->moveTimer = 0;   // 够不着，准备开始迈腿跑
-        }
+    target = bestTarget;
+    if (bestDistSq <= range * range) {
+        state = UnitState::Attacking;
+        attackTimer = 0;
+    } else {
+        state = UnitState::Moving;
+        moveTimer = 0;
     }
 }
 
-
 void Unit::handleMoving(GameManager* gameMgr) {
-    // 1. 目标失效检查
+    // 移动状态用 BFS 找到通向目标附近的下一步，避免被简单贪心卡住。
     if (!target || !target->isAlive()) {
         target = nullptr;
         state = UnitState::Idle;
         return;
     }
 
-    // 2. 距离检查：如果敌人在途中自己走过来了，进入了我的射程，立刻转为攻击！
-    int dx = target->x - this->x;
-    int dy = target->y - this->y;
+    int dx = target->x - x;
+    int dy = target->y - y;
     int distSq = dx * dx + dy * dy;
-    if (distSq <= this->range * this->range) {
+    if (distSq <= range * range) {
         state = UnitState::Attacking;
         attackTimer = 0;
         return;
     }
 
-    // 3. 移动时钟冷却
     if (moveTimer > 0) {
         --moveTimer;
         return;
     }
 
-    // 执行到位移时，说明 moveTimer == 0，冷却好了！
-    if (moveTimer == 0) {
-        int nextX = this->x;
-        int nextY = this->y;
-
-        // 👑 【TODO 任务 F】: 贪心计算下一步想去的空格子
-        // 提示：
-        // 1. 先看 dx。如果 dx != 0，计算出临时的 stepX = this->x + (dx > 0 ? 1 : -1);
-        //    调用 gameMgr->getUnitOnBoard(stepX, this->y)，如果返回 nullptr，说明没被阻挡！
-        //    此时令 nextX = stepX;
-        // 2. 如果横向被挡住了（或者 dx==0），再看 dy。
-        //    如果 dy != 0，计算出临时的 stepY = this->y + (dy > 0 ? 1 : -1);
-        //    验证 (this->x, stepY) 是否为空格。如果是，令 nextY = stepY;
-
-        // ---- 请在此处写下你的贪心选格逻辑 ----
-        if(dx!=0){
-            int stepX=this->x+(dx>0?1:-1);
-            if(stepX>=0&&stepX<8&&!gameMgr->getUnitOnBoard(stepX,this->y)){
-                nextX=stepX;
-            }
+    bool visited[8][8] = {};
+    int parentX[8][8];
+    int parentY[8][8];
+    for (int i = 0; i < 8; ++i) {
+        for (int j = 0; j < 8; ++j) {
+            parentX[i][j] = -1;
+            parentY[i][j] = -1;
         }
-        if(nextX==this->x&&dy!=0){
-            int stepY=this->y+(dy>0?1:-1);
-            if(stepY>=0&&stepY<8&&gameMgr->getUnitOnBoard(this->x,stepY)==nullptr){
-                nextY=stepY;
-            }
-        }
-        // ------------------------------------
-
-        // 4. 如果成功找到了未被阻挡的格子，通知 GameManager 挪动指针
-        if (nextX != this->x || nextY != this->y) {
-            // ⚠️ 假设你在 GameManager 里有类似的移动同步函数：
-            gameMgr->updateUnitPosition(this->x, this->y, nextX, nextY);
-
-            // 同时更新单位内部的坐标
-            this->x = nextX;
-            this->y = nextY;
-        }
-
-        // 5. 迈出一步后，无论成功移动还是被卡住，重置移动冷却计时器
-        moveTimer = moveInterval;
     }
+
+    std::queue<std::pair<int, int>> q;
+    q.push({x, y});
+    visited[x][y] = true;
+
+    int bestX = x;
+    int bestY = y;
+    int bestScore = distSq;
+    const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+
+    while (!q.empty()) {
+        auto [cx, cy] = q.front();
+        q.pop();
+
+        int tx = target->x - cx;
+        int ty = target->y - cy;
+        int score = tx * tx + ty * ty;
+        if (score < bestScore) {
+            bestScore = score;
+            bestX = cx;
+            bestY = cy;
+        }
+
+        for (const auto& dir : dirs) {
+            int nx = cx + dir[0];
+            int ny = cy + dir[1];
+            if (nx < 0 || nx >= 8 || ny < 0 || ny >= 8 || visited[nx][ny]) {
+                continue;
+            }
+
+            Unit* blocker = gameMgr->getUnitOnBoard(nx, ny);
+            if (blocker != nullptr && blocker != this) {
+                continue;
+            }
+
+            visited[nx][ny] = true;
+            parentX[nx][ny] = cx;
+            parentY[nx][ny] = cy;
+            q.push({nx, ny});
+        }
+    }
+
+    int nextX = x;
+    int nextY = y;
+    if (bestX != x || bestY != y) {
+        int stepX = bestX;
+        int stepY = bestY;
+        while (parentX[stepX][stepY] != x || parentY[stepX][stepY] != y) {
+            int px = parentX[stepX][stepY];
+            int py = parentY[stepX][stepY];
+            if (px == -1 || py == -1) {
+                stepX = x;
+                stepY = y;
+                break;
+            }
+            stepX = px;
+            stepY = py;
+        }
+        nextX = stepX;
+        nextY = stepY;
+    }
+
+    if (nextX != x || nextY != y) {
+        gameMgr->updateUnitPosition(x, y, nextX, nextY);
+        x = nextX;
+        y = nextY;
+    }
+
+    moveTimer = moveInterval;
 }
-// 3. 普攻状态处理器
+
 void Unit::handleAttacking(GameManager* gameMgr) {
+    // 攻击状态负责普攻冷却、造成伤害、回蓝；目标失效后重新索敌。
+    (void)gameMgr;
     if (!target || !target->isAlive()) {
         target = nullptr;
         state = UnitState::Idle;
         return;
     }
 
-    // TODO 任务 C: 实现普攻计时器的冷却计算与伤害触发
-    // 1. 如果 attackTimer 大于 0，说明武器还在挥舞/拉弓后摇中，让 attackTimer 自减 1。
-    // 2. 如果 attackTimer 等于 0，说明可以发动攻击：
-    //    - 让目标受到伤害：target->takeDamage(this->atk);
-    //    - 自身回复 10 点法力值：this->addMana(10);
-    //    - 重置计时器，让它重新进入冷却：attackTimer = attackInterval;
-    if(attackTimer>0){
-        --attackTimer;
-    }else if(attackTimer==0){
-        state=UnitState::Attacking;
-        target->takeDamage(this->atk);
-        this->addMana(10);
-        attackTimer=attackInterval;
+    int dx = target->x - x;
+    int dy = target->y - y;
+    if (dx * dx + dy * dy > range * range) {
+        state = UnitState::Moving;
+        return;
     }
+
+    if (attackTimer > 0) {
+        --attackTimer;
+        return;
+    }
+
+    target->takeDamage(atk);
+    addMana(10);
+    attackTimer = attackInterval;
 }
 
-// 4. 大招状态处理器
 void Unit::handleCasting(GameManager* gameMgr) {
-    // 释放大招时自动清空蓝条
+    // 施法是一帧完成的行为，释放后清空法力并回到空闲重新判断战况。
     castSkill(gameMgr);
     mana = 0;
-    state=UnitState::Idle;
-    // TODO 任务 D: 释放大招后的行为收尾
-    // 大招释放是一瞬间的动作。大招结束后，角色应该变成什么状态？
-    // 请在此行将 state 修改为正确的后续状态。
+    state = UnitState::Idle;
 }
 
-void Unit::castSkill(GameManager*gameMgr){//基类的默认大招实现（如果没有子类重写，就触发普通痛击）
+void Unit::castSkill(GameManager* gameMgr) {
+    // 基类默认技能：对当前目标造成一次双倍攻击伤害。
+    (void)gameMgr;
     if (target && target->isAlive()) {
-        target->takeDamage(this->atk * 2); // 默认：对当前目标造成双倍伤害
+        target->takeDamage(atk * 2);
     }
 }

@@ -2,6 +2,11 @@
 #include "ui_mainwindow.h"
 #include"heroes.h"
 #include"player.h"
+#include <QDateTime>
+#include <QDir>
+#include <QFileInfo>
+#include <algorithm>
+#include <iostream>
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
@@ -9,22 +14,15 @@ MainWindow::MainWindow(QWidget *parent)
     ui->setupUi(this);
     gameMgr = new GameManager();
 
-    setFixedSize(800, 700); // 设置固定窗口大小
+    setMinimumSize(800, 760); // 允许窗口最大化/拉伸，同时保证商店完整可见可点。
+    resize(800, 760);
     setMouseTracking(true); // 极其重要：开启后鼠标不按下也能触发 MoveEvent
     //初始化并启动主时钟（每33毫秒跳一次）
     gameTimer=new QTimer(this);
     connect(gameTimer,&QTimer::timeout,this,&MainWindow::onGameTick);
     gameTimer->start(33);
-    Unit* testHero = new Unit(100, 20, 1, 100, Owner::PlayerCtrl);
-    // 把它放进备战区第 0 格
-    // Unit* ryze = new Ryze(Owner::PlayerCtrl);
-    // gameMgr->MoveUnit(ryze, 3, 7, false);
-
-    // ✨ 召唤盖伦上阵测试（放在第 7 行第 4 列，顶在前面）
-    Unit* garen = new Garen(Owner::PlayerCtrl);
-    gameMgr->MoveUnit(garen, 4, 7, false);
-    gameMgr->MoveUnit(testHero, 0, 0, true);
-    gameMgr->spawnEnemyRound(1);
+    refreshSaveList();
+    // 正式开局不预放测试单位；玩家从商店购买英雄，再拖到棋盘上阵。
     update(); // 别忘了通知界面重绘
 }
 
@@ -32,6 +30,130 @@ MainWindow::~MainWindow()
 {
     delete ui;
     delete gameMgr;
+}
+
+void MainWindow::refreshSaveList() {
+    // 扫描 saves 目录，按文件修改时间倒序列出历史存档。
+    QDir dir("saves");
+    if (!dir.exists()) {
+        dir.mkpath(".");
+    }
+
+    QFileInfoList files = dir.entryInfoList(QStringList() << "*.json",
+                                            QDir::Files,
+                                            QDir::Time);
+    saveFiles.clear();
+    for (const QFileInfo& file : files) {
+        saveFiles.append(file.filePath());
+    }
+}
+
+QString MainWindow::createTimestampSavePath() const {
+    // 为每次保存生成独立文件名，避免覆盖旧存档。
+    QDir dir("saves");
+    if (!dir.exists()) {
+        dir.mkpath(".");
+    }
+    QString stamp = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss");
+    return dir.filePath("save_" + stamp + ".json");
+}
+
+void MainWindow::resetInteractionState() {
+    // 读档或返回菜单时清空鼠标拖拽状态，避免悬空指针指向旧单位。
+    selectedUnit = nullptr;
+    focusedUnit = nullptr;
+    selectedItemIndex = -1;
+    isDraggingItem = false;
+}
+
+void MainWindow::drawStartMenu(QPainter& painter) {
+    // 初始界面：提供新游戏、保存当前进度、历史存档入口。
+    painter.fillRect(rect(), QColor(238, 242, 246));
+
+    painter.setPen(QColor(30, 40, 55));
+    painter.setFont(QFont("Microsoft YaHei", 28, QFont::Bold));
+    painter.drawText(QRect(0, 110, width(), 60), Qt::AlignCenter, "Synera Auto-Arena");
+
+    painter.setFont(QFont("Microsoft YaHei", 11));
+    painter.setPen(QColor(80, 90, 105));
+    painter.drawText(QRect(0, 165, width(), 30), Qt::AlignCenter, "开始新游戏，或从历史存档继续。");
+
+    painter.setBrush(QColor(74, 132, 210));
+    painter.setPen(QPen(QColor(46, 94, 160), 1));
+    painter.drawRect(MENU_START_RECT);
+    painter.setPen(Qt::white);
+    painter.setFont(QFont("Microsoft YaHei", 12, QFont::Bold));
+    painter.drawText(MENU_START_RECT, Qt::AlignCenter, "开始新游戏");
+
+    painter.setBrush(QColor(92, 170, 120));
+    painter.setPen(QPen(QColor(52, 125, 82), 1));
+    painter.drawRect(MENU_SAVE_RECT);
+    painter.setPen(Qt::white);
+    painter.drawText(MENU_SAVE_RECT, Qt::AlignCenter, "保存当前进度");
+
+    painter.setBrush(QColor(255, 255, 255));
+    painter.setPen(QPen(QColor(185, 195, 205), 1));
+    painter.drawRect(MENU_LIST_RECT);
+
+    painter.setPen(QColor(30, 40, 55));
+    painter.setFont(QFont("Microsoft YaHei", 12, QFont::Bold));
+    painter.drawText(MENU_LIST_RECT.adjusted(16, 12, -16, -220), Qt::AlignLeft, "历史存档");
+
+    painter.setFont(QFont("Microsoft YaHei", 9));
+    if (saveFiles.empty()) {
+        painter.setPen(QColor(130, 140, 150));
+        painter.drawText(MENU_LIST_RECT.adjusted(16, 58, -16, -16), Qt::AlignLeft, "暂无存档。");
+        return;
+    }
+
+    int rowY = MENU_LIST_RECT.top() + 48;
+    int maxRows = saveFiles.size()> 7?7:saveFiles.size();
+    for (int i = 0; i < maxRows; ++i) {
+        QRect rowRect(MENU_LIST_RECT.left() + 12, rowY + i * 28, MENU_LIST_RECT.width() - 24, 24);
+        painter.setBrush(i % 2 == 0 ? QColor(244, 247, 250) : QColor(255, 255, 255));
+        painter.setPen(Qt::NoPen);
+        painter.drawRect(rowRect);
+
+        QFileInfo info(saveFiles[i]);
+        painter.setPen(QColor(40, 55, 75));
+        QString label = info.completeBaseName() + "    " + info.lastModified().toString("MM-dd hh:mm");
+        painter.drawText(rowRect.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft, label);
+    }
+}
+
+bool MainWindow::handleStartMenuClick(const QPoint& pos) {
+    // 处理初始界面的按钮和存档列表点击；返回 true 表示事件已消费。
+    if (MENU_START_RECT.contains(pos)) {
+        delete gameMgr;
+        gameMgr = new GameManager();
+        resetInteractionState();
+        inStartMenu = false;
+        update();
+        return true;
+    }
+
+    if (MENU_SAVE_RECT.contains(pos)) {
+        gameMgr->saveGame(createTimestampSavePath());
+        refreshSaveList();
+        update();
+        return true;
+    }
+
+    int rowY = MENU_LIST_RECT.top() + 48;
+    int maxRows = saveFiles.size()> 7?7:saveFiles.size();
+    for (int i = 0; i < maxRows; ++i) {
+        QRect rowRect(MENU_LIST_RECT.left() + 12, rowY + i * 28, MENU_LIST_RECT.width() - 24, 24);
+        if (rowRect.contains(pos)) {
+            if (gameMgr->loadGame(saveFiles[i])) {
+                resetInteractionState();
+                inStartMenu = false;
+            }
+            update();
+            return true;
+        }
+    }
+
+    return false;
 }
 // --- 绘图逻辑：每当执行 update() 时，系统会自动调用这个函数 ---
 // void MainWindow::paintEvent(QPaintEvent *event) {
@@ -402,6 +524,11 @@ void MainWindow::paintEvent(QPaintEvent *event) {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing); // 开启抗锯齿，让英雄圆圈和线条边缘更平滑
 
+    if (inStartMenu) {
+        drawStartMenu(painter);
+        return;
+    }
+
     // ==================== 1. 绘制棋盘网格 (8x8 战场) ====================
     for(int i = 0; i < 8; i++) {
         for(int j = 0; j < 8; j++) {
@@ -677,6 +804,21 @@ void MainWindow::paintEvent(QPaintEvent *event) {
     painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
     painter.drawText(BUY_XP_BTN_RECT, Qt::AlignCenter, "购买经验 (4G)");
 
+    // --- 存档按钮 ---
+    painter.setBrush(QColor(90, 170, 120));
+    painter.setPen(QPen(QColor(50, 120, 80), 1));
+    painter.drawRect(SAVE_BTN_RECT);
+    painter.setPen(Qt::white);
+    painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
+    painter.drawText(SAVE_BTN_RECT, Qt::AlignCenter, "保存存档 (S)");
+
+    // --- 读档按钮 ---
+    painter.setBrush(QColor(70, 130, 190));
+    painter.setPen(QPen(QColor(40, 90, 150), 1));
+    painter.drawRect(LOAD_BTN_RECT);
+    painter.setPen(Qt::white);
+    painter.drawText(LOAD_BTN_RECT, Qt::AlignCenter, "读取存档 (L)");
+
     // ==================== 8. 绘制左边栏实时羁绊看板 ====================
     int traitY = OFFSET_Y;
     painter.setPen(Qt::black);
@@ -818,6 +960,11 @@ void MainWindow::paintEvent(QPaintEvent *event) {
 }
 
 void MainWindow::mousePressEvent(QMouseEvent *event) {
+    if (inStartMenu) {
+        handleStartMenuClick(event->pos());
+        return;
+    }
+
     // 优先检测是否点中了装备库存格
     for (int i = 0; i < (int)gameMgr->itemBench.size(); i++) {
         int x = 20 + i * (ITEM_SIZE + 10);
@@ -846,6 +993,22 @@ void MainWindow::mousePressEvent(QMouseEvent *event) {
             gameMgr->buyXP();
             update();
         }
+        return;
+    }
+    // 存档按钮：把当前局面写入 saves 目录下的新存档文件。
+    if (SAVE_BTN_RECT.contains(event->pos())) {
+        gameMgr->saveGame(createTimestampSavePath());
+        refreshSaveList();
+        update();
+        return;
+    }
+    // 读档按钮：回到初始界面，从历史存档列表选择。
+    if (LOAD_BTN_RECT.contains(event->pos())) {
+        refreshSaveList();
+        resetInteractionState();
+        inStartMenu = true;
+        update();
+        return;
     }
     // 2. ✨ 新增判定：是否点击了 5 联抽商店的某张卡片
     if (gameMgr->getState() == GameState::Preparation) { // 只有准备阶段允许买牌
@@ -885,6 +1048,10 @@ void MainWindow::mousePressEvent(QMouseEvent *event) {
 }
 
 void MainWindow::mouseMoveEvent(QMouseEvent *event) {
+    if (inStartMenu) {
+        return;
+    }
+
     if(selectedUnit) {
         dragPos = event->pos();
         update();
@@ -892,6 +1059,10 @@ void MainWindow::mouseMoveEvent(QMouseEvent *event) {
 }
 
 void MainWindow::mouseReleaseEvent(QMouseEvent *event) {
+    if (inStartMenu) {
+        return;
+    }
+
     // 如果松开鼠标时，手里正抓着一件装备
     if (isDraggingItem && selectedItemIndex != -1) {
         isDraggingItem = false;
@@ -946,13 +1117,36 @@ void MainWindow::mouseReleaseEvent(QMouseEvent *event) {
 }
 
 void MainWindow::onGameTick(){
-    gameMgr->updateTick();//驱动后台逻辑
+    if (!inStartMenu) {
+        gameMgr->updateTick();//驱动后台逻辑
+    }
     update();//强制界面重绘
 }
 void MainWindow::keyPressEvent(QKeyEvent*event){
+    if (inStartMenu) {
+        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+            inStartMenu = false;
+            update();
+        }
+        return;
+    }
+
     if(event->key()==Qt::Key_Space){
         //按键为空格，则开始战斗
         gameMgr->startBattle();
+        update();
+    } else if (event->key() == Qt::Key_S) {
+        // S 快捷键保存当前局面。
+        gameMgr->saveGame(createTimestampSavePath());
+        refreshSaveList();
+        update();
+    } else if (event->key() == Qt::Key_L) {
+        // L 快捷键读取最近一次历史存档。
+        refreshSaveList();
+        if (!saveFiles.empty()) {
+            gameMgr->loadGame(saveFiles.first());
+            resetInteractionState();
+        }
         update();
     }
 }
