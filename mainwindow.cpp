@@ -56,6 +56,8 @@ MainWindow::MainWindow(QWidget *parent)
     , ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
+    setMenuBar(nullptr);
+    statusBar()->setVisible(false);
     gameMgr = new GameManager();
 
     setMinimumSize(800, 790);
@@ -464,7 +466,7 @@ void MainWindow::paintEvent(QPaintEvent *event) {
     drawItemBench(painter);
     drawProjectiles(painter);
     drawBattleResult(painter);
-    drawBottomHint(painter);
+    // drawBottomHint(painter);
 
     if (isPaused) { drawPauseMenu(painter); }
 }
