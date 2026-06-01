@@ -18,8 +18,8 @@ public:
     // 重写大招：超负荷法球
     void castSkill(GameManager* gameMgr) override {
         if (target && target->isAlive()) {
-            // 对当前锁定的目标造成 150 点巨额魔法伤害
             target->takeDamage(150);
+            gameMgr->addSkillEffect(target->x, target->y, "ryze_blast", 16);
         }
     }
 };
@@ -37,16 +37,15 @@ public:
 
     // 重写大招：祈愿
     void castSkill(GameManager* gameMgr) override {
-        // 扫描全场 8x8 棋盘，拯救所有和自己同一阵营的活着的队友！
         for (int i = 0; i < 8; i++) {
             for (int j = 0; j < 8; j++) {
                 Unit* ally = gameMgr->getUnitOnBoard(i, j);
                 if (ally && ally->owner == this->owner && ally->isAlive()) {
-                    // 回复 80 点生命值，但不能超过最大生命值上限
                     ally->hp = std::min(ally->maxHp, ally->hp + 80);
                 }
             }
         }
+        gameMgr->addSkillEffect(this->x, this->y, "soraka_heal", 24);
     }
 };
 //3.战士盖伦
@@ -69,8 +68,91 @@ public:
                     if(targetUnit!=nullptr&&targetUnit->owner==Owner::EnemyCtrl&&targetUnit->isAlive()){
                         targetUnit->takeDamage(80);
                     }
+                    gameMgr->addSkillEffect(i, j, "garen_spin", 18);
                 }
             }
+        }
+    }
+};
+
+// ==================== 4. 蕾欧娜（前排坦克 / 眩晕控制） ====================
+class Leona : public Unit {
+public:
+    Leona(Owner _owner = Owner::PlayerCtrl)
+        : Unit(480, 28, 1, 70, _owner) {
+        name = "Leona";
+        cost = 2;
+        traits.push_back("Knight");
+    }
+
+    void castSkill(GameManager* gameMgr) override {
+        if (target && target->isAlive()) {
+            target->takeDamage(120);
+            target->stunFrames = target->attackInterval * 2;
+            gameMgr->addSkillEffect(target->x, target->y, "leona_shield", 16);
+        }
+    }
+};
+
+// ==================== 5. 艾希（后排射手 / 直线 AOE） ====================
+class Ashe : public Unit {
+public:
+    Ashe(Owner _owner = Owner::PlayerCtrl)
+        : Unit(260, 42, 5, 50, _owner) {
+        name = "Ashe";
+        cost = 2;
+        traits.push_back("Knight");
+    }
+
+    void castSkill(GameManager* gameMgr) override {
+        bool hitAny = false;
+        int lastHitY = target ? target->y : y;
+        for (int d = 0; d < 3; d++) {
+            int ty = target ? target->y : y;
+            int nx = x;
+            int ny = ty + d;
+            if (nx >= 0 && nx < 8 && ny >= 0 && ny < 8) {
+                Unit* enemy = gameMgr->getUnitOnBoard(nx, ny);
+                if (enemy && enemy->owner == Owner::EnemyCtrl && enemy->isAlive()) {
+                    enemy->takeDamage(100);
+                    hitAny = true;
+                }
+            }
+        }
+        if (hitAny && target) {
+            gameMgr->addSkillEffect(x, lastHitY, "ashe_arrow", 14);
+        } else if (target) {
+            gameMgr->addSkillEffect(x, target->y, "ashe_arrow", 14);
+        }
+    }
+};
+
+// ==================== 6. 烬（远程收割 / 锁定最低血量） ====================
+class Jhin : public Unit {
+public:
+    Jhin(Owner _owner = Owner::PlayerCtrl)
+        : Unit(240, 60, 4, 80, _owner) {
+        name = "Jhin";
+        cost = 2;
+        traits.push_back("Knight");
+    }
+
+    void castSkill(GameManager* gameMgr) override {
+        Unit* lowestHpEnemy = nullptr;
+        int lowestHp = 999999;
+        for (int i = 0; i < 8; i++) {
+            for (int j = 0; j < 8; j++) {
+                Unit* enemy = gameMgr->getUnitOnBoard(i, j);
+                if (enemy && enemy->owner == Owner::EnemyCtrl && enemy->isAlive()
+                    && enemy->hp < lowestHp) {
+                    lowestHp = enemy->hp;
+                    lowestHpEnemy = enemy;
+                }
+            }
+        }
+        if (lowestHpEnemy) {
+            lowestHpEnemy->takeDamage(200);
+            gameMgr->addSkillEffect(lowestHpEnemy->x, lowestHpEnemy->y, "jhin_snipe", 20);
         }
     }
 };

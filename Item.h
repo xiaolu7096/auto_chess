@@ -7,7 +7,8 @@ enum class ItemType {
     Sword,      // 铁剑：攻击力 +15
     Armor,      // 锁子甲：生命值 +150
     Glove,      // 急速手套：攻速提升 20%
-    Crystal     // 蓝水晶：最大法力值 -30
+    Crystal,    // 蓝水晶：最大法力值 -30
+    Advanced    // 高级合成装备
 };
 
 class Item {
@@ -29,7 +30,11 @@ public:
             name = "急速手套"; bonusSpeed = 0.20; break;
         case ItemType::Crystal:
             name = "蓝水晶"; manaReduction = 30; break;
+        case ItemType::Advanced:
+            break;  // 由子类构造函数自行设置属性
         }
     }
+
+    virtual ~Item() = default;
 };
 #endif // ITEM_H

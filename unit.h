@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include "Item.h"
+#include "advanceditems.h"
 
 // 单位归属：玩家单位和敌方单位共用同一个 Unit 体系。
 enum class Owner {
@@ -38,6 +39,12 @@ public:
     int mana;
     int maxMana;
 
+    // 基础原始属性（装备加成后不含羁绊Buff的基准值，用于每回合还原）。
+    int baseMaxHp;
+    int baseAtk;
+    int baseMaxMana;
+    int baseAttackInterval;  // 基础攻击间隔（装备攻速加减需要还原基准值）
+
     // 阵营与羁绊：敌我单位通过 owner 区分，traits 用于职业/羁绊统计。
     Owner owner;
     std::vector<std::string> traits;
@@ -56,6 +63,9 @@ public:
     int attackTimer;
     int moveInterval;
     int moveTimer;
+
+    // 眩晕剩余帧数：>0 时 unit 无法普攻，每帧递减。
+    int stunFrames = 0;
 
     // 英雄信息与升星属性。
     std::string name;
@@ -77,8 +87,39 @@ public:
         return (star >= 2) ? 2 : 1;
     }
 
-    // 穿戴装备：成功时应用属性加成，装备栏满时返回 false。
+    // 穿戴装备：成功时应用属性加成；合成时自动检测两件基础装备 → 高级装备。
     bool equipItem(Item* item) {
+        // 先检测是否与已装备的基础装备触发合成
+        for (size_t i = 0; i < equippedItems.size(); i++) {
+            AdvancedItem* result = AdvancedItem::synthesize(equippedItems[i], item);
+            if (result) {
+                // 撤回被替换的旧装备属性
+                atk -= equippedItems[i]->bonusAtk;
+                maxHp -= equippedItems[i]->bonusHp;
+                delete equippedItems[i];
+                equippedItems.erase(equippedItems.begin() + i);
+                delete item;  // 消耗进来的基础装备
+
+                // 穿戴合成后的高级装备（递归，不会再触发合成）
+                equippedItems.push_back(result);
+                atk += result->bonusAtk;
+                maxHp += result->bonusHp;
+                hp += result->bonusHp;
+                if (maxMana > result->manaReduction)
+                    maxMana -= result->manaReduction;
+                else
+                    maxMana = 10;
+                // 攻速还原基准值后重新计算
+                attackInterval = baseAttackInterval;
+                for (Item* eq : equippedItems) {
+                    if (eq->bonusSpeed > 0.0)
+                        attackInterval = std::max(1, (int)(attackInterval / (1.0 + eq->bonusSpeed)));
+                }
+                return true;
+            }
+        }
+
+        // 未触发合成，检查槽位限制
         if ((int)equippedItems.size() >= getMaxItemSlots()) {
             return false;
         }

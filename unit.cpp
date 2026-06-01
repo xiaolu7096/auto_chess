@@ -6,7 +6,8 @@
 
 Unit::Unit(int _hp, int _atk, int _range, int _maxMana, Owner _owner)
     : hp(_hp), maxHp(_hp), atk(_atk), range(_range),
-      mana(0), maxMana(_maxMana), owner(_owner)
+      mana(0), maxMana(_maxMana), baseMaxHp(_hp), baseAtk(_atk), baseMaxMana(_maxMana),
+      owner(_owner)
 {
     // 单位刚创建时还没有真实位置，由 GameManager 放入棋盘或备战区。
     x = -1;
@@ -22,10 +23,15 @@ Unit::Unit(int _hp, int _atk, int _range, int _maxMana, Owner _owner)
     attackTimer = 0;
     moveInterval = 20;
     moveTimer = 0;
+
+    baseAttackInterval = attackInterval;
 }
 
 Unit::~Unit() {
-    // 装备对象由装备栏/掉落系统持有；Unit 本身不额外释放外部资源。
+    for (Item* item : equippedItems) {
+        delete item;
+    }
+    equippedItems.clear();
 }
 
 bool Unit::isAlive() const {
@@ -223,8 +229,6 @@ void Unit::handleMoving(GameManager* gameMgr) {
 }
 
 void Unit::handleAttacking(GameManager* gameMgr) {
-    // 攻击状态负责普攻冷却、造成伤害、回蓝；目标失效后重新索敌。
-    (void)gameMgr;
     if (!target || !target->isAlive()) {
         target = nullptr;
         state = UnitState::Idle;
@@ -238,20 +242,61 @@ void Unit::handleAttacking(GameManager* gameMgr) {
         return;
     }
 
+    if (stunFrames > 0) {
+        --stunFrames;
+        attackTimer = attackInterval;
+        return;
+    }
+
     if (attackTimer > 0) {
         --attackTimer;
         return;
     }
 
-    target->takeDamage(atk);
+    // 计算基础伤害，逐级穿过攻击者与受击者的高级装备被动钩子
+    int attackDamage = atk;
+
+    // 攻击者 onAttack（无尽之刃暴击等）
+    for (Item* item : equippedItems) {
+        AdvancedItem* adv = dynamic_cast<AdvancedItem*>(item);
+        if (adv) adv->onAttack(this, target, attackDamage, gameMgr);
+    }
+
+    // 受击者 onDamaged（荆棘之甲反弹等）
+    for (Item* item : target->equippedItems) {
+        AdvancedItem* adv = dynamic_cast<AdvancedItem*>(item);
+        if (adv) adv->onDamaged(target, this, attackDamage, gameMgr);
+    }
+
+    target->takeDamage(attackDamage);
     addMana(10);
     attackTimer = attackInterval;
+
+    if (!target->isAlive()) {
+        target = nullptr;
+        state = UnitState::Idle;
+        return;
+    }
+
+    if (range > 1 && gameMgr) {
+        gameMgr->addProjectile(x, y, target->x, target->y, false);
+    }
 }
 
 void Unit::handleCasting(GameManager* gameMgr) {
-    // 施法是一帧完成的行为，释放后清空法力并回到空闲重新判断战况。
     castSkill(gameMgr);
     mana = 0;
+
+    // 技能释放后触发高级装备被动（卢登的回声 AOE 等）
+    for (Item* item : equippedItems) {
+        AdvancedItem* adv = dynamic_cast<AdvancedItem*>(item);
+        if (adv) adv->onSkillCast(this, target, gameMgr);
+    }
+
+    if (range > 1 && gameMgr && target && target->isAlive()) {
+        gameMgr->addProjectile(x, y, target->x, target->y, true);
+    }
+
     state = UnitState::Idle;
 }
 

@@ -2,9 +2,8 @@
 #define GAMEMANAGER_H
 
 #define BENCHSIZE 8
-#define LENGTH 8
-#define WIDTH 8
 
+#include "board.h"
 #include "player.h"
 #include "unit.h"
 
@@ -13,13 +12,31 @@
 #include <string>
 #include <vector>
 
+#include <QPointF>
 #include <QString>
 
-// 游戏的三个主阶段：准备、战斗、结算。
 enum class GameState {
     Preparation,
     Battle,
     Settlement,
+};
+
+struct Projectile {
+    int fromX, fromY;
+    int toX, toY;
+    float progress = 0.0f;
+    int totalFrames = 12;
+    int currentFrame = 0;
+    bool isSkill = false;
+    bool showHit = false;
+    int hitTimer = 0;
+};
+
+// 技能特效：位置 + 技能名 + 剩余帧数，由 mainwindow 用对应图片绘制。
+struct SkillEffect {
+    int x, y;
+    std::string skillName;
+    int timer;
 };
 
 class GameManager {
@@ -27,35 +44,31 @@ public:
     GameManager();
     ~GameManager();
 
-    // 查询棋盘/备战区单位，UI 绘制和战斗 AI 都会使用。
     Unit* getUnitOnBoard(int x, int y);
     Unit* getUnitOnBench(int index);
 
-    // 战斗中同步单位坐标与棋盘指针。
     void updateUnitPosition(int oldX, int oldY, int newX, int newY);
 
-    // 准备阶段拖拽单位：可移动到空格，也可与友方单位交换。
     bool MoveUnit(Unit* target, int nextX, int nextY, bool toBench);
+    bool canMoveUnit(Unit* target, int nextX, int nextY, bool toBench);
 
-    // 从棋盘或备战区移除单位。
     void RemoveUnit(Unit* TargetUnit);
 
-    // 检查玩家是否还能继续上阵。
     bool Checkpopulation();
 
-    // 按轮数生成敌人。
     void spawnEnemyRound(int round);
 
     GameState getState() { return currentState; }
     int getCurrentRound() { return currentround; }
+    int getWinStreak() const { return winStreak; }
+    int getLoseStreak() const { return loseStreak; }
+    int getInterestGold() const { return interestGold; }
 
-    // 阶段流：开始战斗、每帧更新、胜负结算、死亡清理。
     void startBattle();
     void updateTick();
     void checkBattleResult();
     void cleanupDeadUnits();
 
-    // 商店和经济操作。
     void refreshShop();
     void refreshShopManual();
     bool buyHeroFromShop(int shopIndex);
@@ -63,37 +76,61 @@ public:
     int getpoplulation();
     Unit* getShopSlot(int index) { return shopSlots[index]; }
     int getPlayerGold() { return player->getGold(); }
+    int getPlayerExp() { return player->getExp(); }
+    int getPlayerExpToNextLevel() { return player->getExpToNextLevel(); }
 
-    // 自动升星与羁绊统计。
     void checkAndCombineStars();
     void updateActiveTraits();
 
-    // 存档/读档：把当前游戏状态写入 JSON 文件，再从文件完整恢复。
     bool saveGame(const QString& filePath);
     bool loadGame(const QString& filePath);
 
-    // UI 直接读取的全局状态。
+    void addProjectile(int fromX, int fromY, int toX, int toY, bool isSkill);
+    void addSkillEffect(int x, int y, const std::string& skillName, int duration = 20);
+    void updateProjectiles();
+
+    // 高级装备钩子：在战斗各阶段遍历单位身上的高级装备并触发被动
+    void triggerItemCallbacks_BattleStart();
+    void triggerItemCallbacks_Tick();
+    bool triggerItemCallbacks_Death(Unit* u);  // 返回 true 表示单位被复活
+
     int playerHp = 100;
     int enemyHp = 100;
     int resultDisplayTimer = 0;
     QString battleResultStr = "NONE";
+    QString settlementBreakdown;  // 结算奖励明细
     std::map<std::string, int> activeTraitsCount;
 
-    // 玩家装备库存。
     std::vector<Item*> itemBench;
     const int MAX_ITEM_BENCH = 8;
 
+std::vector<Projectile> projectiles;
+    std::vector<SkillEffect> skillEffects;
+
+    Board board;
+
+    int battleFrame = 0;  // 当前战斗帧计数，用于 onTick 周期钩子
+
+    // 连胜 / 连败经济系统：每次结算时发放利息与额外奖励。
+    int winStreak = 0;
+    int loseStreak = 0;
+    int interestGold = 0;  // 上轮生成的利息额，UI展示用
+
 private:
-    // 存档辅助：单位/装备的序列化与反序列化。
     Unit* createUnitByName(const std::string& name, Owner owner);
     Item* createItemByName(const std::string& name);
 
-    Unit* board[LENGTH][WIDTH];
+    void registerUnit(Unit* u);
+    void unregisterUnit(Unit* u);
+    void clearAllUnits();
+
     Unit* bench[BENCHSIZE];
     Player* player;
     GameState currentState;
     int currentround;
     Unit* shopSlots[5];
+
+    std::vector<Unit*> allUnits;
 };
 
 #endif // GAMEMANAGER_H

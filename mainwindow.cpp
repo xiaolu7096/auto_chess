@@ -1,12 +1,56 @@
-#include "mainwindow.h"
+﻿#include "mainwindow.h"
 #include "ui_mainwindow.h"
-#include"heroes.h"
-#include"player.h"
+#include "heroes.h"
+#include "player.h"
+#include <QCoreApplication>
 #include <QDateTime>
+// Disable std::filesystem usage in Qt
+#ifndef QT_NO_FILESYSTEM
+#define QT_NO_FILESYSTEM
+#endif
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
+#include <QWheelEvent>
 #include <algorithm>
+#include <cmath>
 #include <iostream>
+
+static QColor heroColor(Unit* u) {
+    if (u->owner == Owner::EnemyCtrl) {
+        if (u->name == "Garen")      return QColor(50, 120, 240);
+        if (u->name == "Ryze")       return QColor(150, 80, 220);
+        if (u->name == "Soraka")     return QColor(40, 180, 150);
+        if (u->name == "Leona")      return QColor(240, 180, 50);
+        if (u->name == "Ashe")       return QColor(60, 180, 240);
+        if (u->name == "Jhin")       return QColor(200, 50, 80);
+        return QColor(240, 60, 60);
+    }
+    if (u->name == "Garen")      return QColor(50, 120, 240);
+    if (u->name == "Ryze")       return QColor(150, 80, 220);
+    if (u->name == "Soraka")     return QColor(40, 180, 150);
+    if (u->name == "Leona")     return QColor(240, 180, 50);
+    if (u->name == "Ashe")      return QColor(60, 180, 240);
+    if (u->name == "Jhin")      return QColor(200, 50, 80);
+    return QColor(50, 120, 240);
+}
+
+static QColor itemColor(Item* item) {
+    if (item->type == ItemType::Sword)  return QColor(220, 20, 60);
+    if (item->type == ItemType::Armor)  return QColor(70, 130, 180);
+    if (item->type == ItemType::Glove)  return QColor(46, 139, 87);
+    if (item->type == ItemType::Crystal) return QColor(30, 144, 255);
+    if (item->type == ItemType::Advanced) {
+        if (item->name == "复活甲")     return QColor(255, 215, 0);
+        if (item->name == "无尽之刃")   return QColor(180, 30, 30);
+        if (item->name == "大天使之杖")  return QColor(100, 150, 255);
+        if (item->name == "荆棘之甲")   return QColor(100, 100, 130);
+        if (item->name == "狂徒铠甲")   return QColor(40, 120, 40);
+        if (item->name == "卢登的回声")  return QColor(200, 50, 200);
+        return QColor(200, 180, 50);
+    }
+    return QColor(200, 200, 200);
+}
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , ui(new Ui::MainWindow)
@@ -14,22 +58,45 @@ MainWindow::MainWindow(QWidget *parent)
     ui->setupUi(this);
     gameMgr = new GameManager();
 
-    setMinimumSize(800, 760); // 允许窗口最大化/拉伸，同时保证商店完整可见可点。
-    resize(800, 760);
-    setMouseTracking(true); // 极其重要：开启后鼠标不按下也能触发 MoveEvent
-    //初始化并启动主时钟（每33毫秒跳一次）
+    setMinimumSize(800, 790);
+    resize(800, 790);
+    setMouseTracking(true);
+    setFocusPolicy(Qt::StrongFocus);
+
+    m_rightPanel = new RightControlPanel(gameMgr, centralWidget());
+    connect(m_rightPanel, &RightControlPanel::pauseRequested, this, &MainWindow::onPauseRequested);
+    connect(m_rightPanel, &RightControlPanel::refreshShopRequested, this, &MainWindow::onRefreshShopRequested);
+    connect(m_rightPanel, &RightControlPanel::buyXPRequested, this, &MainWindow::onBuyXPRequested);
+
+    loadImages();
     gameTimer=new QTimer(this);
     connect(gameTimer,&QTimer::timeout,this,&MainWindow::onGameTick);
     gameTimer->start(33);
     refreshSaveList();
-    // 正式开局不预放测试单位；玩家从商店购买英雄，再拖到棋盘上阵。
-    update(); // 别忘了通知界面重绘
+    update();
 }
 
 MainWindow::~MainWindow()
 {
     delete ui;
     delete gameMgr;
+}
+
+void MainWindow::resizeEvent(QResizeEvent* event) {
+    QMainWindow::resizeEvent(event);
+    m_scaleX = (float)width() / 800.0f;
+    m_scaleY = (float)height() / 790.0f;
+    float s = std::min(m_scaleX, m_scaleY);
+    m_scaleX = s;
+    m_scaleY = s;
+
+    const int panelDesignX = 610;
+    const int panelDesignW = 190;
+    int px = (int)(panelDesignX * m_scaleX);
+    int py = 0;
+    int pw = (int)(panelDesignW * m_scaleX);
+    int ph = (int)(790 * m_scaleY);
+    m_rightPanel->setGeometry(px, py, pw, ph);
 }
 
 void MainWindow::refreshSaveList() {
@@ -59,11 +126,73 @@ QString MainWindow::createTimestampSavePath() const {
 }
 
 void MainWindow::resetInteractionState() {
-    // 读档或返回菜单时清空鼠标拖拽状态，避免悬空指针指向旧单位。
     selectedUnit = nullptr;
     focusedUnit = nullptr;
     selectedItemIndex = -1;
     isDraggingItem = false;
+    dragHoverTarget = QPoint(-1, -1);
+    dragHoverIsBench = false;
+    dragHoverValid = false;
+}
+
+void MainWindow::loadImages() {
+    auto findResource = [](const QString& filename) -> QString {
+        QDir dir(QCoreApplication::applicationDirPath());
+        for (int levels = 0; levels <= 8; levels++) {
+            QString resPath = dir.absoluteFilePath("resources/" + filename);
+            if (QFile::exists(resPath)) return resPath;
+            if (!dir.cdUp()) break;
+        }
+        if (QFile::exists("resources/" + filename))
+            return QDir::current().absoluteFilePath("resources/" + filename);
+        return QString();
+    };
+
+    auto loadScaled = [&](const QString& filename, int w, int h) -> QPixmap {
+        QString fullPath = findResource(filename);
+        if (fullPath.isEmpty()) return QPixmap();
+        QPixmap pix(fullPath);
+        if (pix.isNull()) return QPixmap();
+        return pix.scaled(w, h, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    };
+
+    heroPixmaps["Garen"]  = loadScaled("garen.png", 50, 50);
+    heroPixmaps["Ryze"]   = loadScaled("ryze.png", 50, 50);
+    heroPixmaps["Soraka"] = loadScaled("soraka.png", 50, 50);
+    heroPixmaps["Leona"]  = loadScaled("leona.png", 50, 50);
+    heroPixmaps["Ashe"]   = loadScaled("ashe.png", 50, 50);
+    heroPixmaps["Jhin"]   = loadScaled("jhin.png", 50, 50);
+
+    enemyPixmap1 = loadScaled("enemy1.png", 50, 50);
+    enemyPixmap2 = loadScaled("enemy2.png", 50, 50);
+
+    itemPixmaps[ItemType::Sword]   = loadScaled("item_sword.png", 16, 16);
+    itemPixmaps[ItemType::Armor]   = loadScaled("item_armer.png", 16, 16);
+    itemPixmaps[ItemType::Glove]   = loadScaled("item_glove.png", 16, 16);
+    itemPixmaps[ItemType::Crystal] = loadScaled("item_crystal.png", 16, 16);
+
+    projectileArrow = loadScaled("projectile_arrow.png", 24, 24);
+    projectileMagic = loadScaled("projectile_magic.png", 30, 30);
+    hitEffectPixmap = loadScaled("hit_effect.png", 40, 40);
+
+    skillEffectPixmaps["garen_spin"]   = loadScaled("skill_garen_spin.png", 70, 70);
+    skillEffectPixmaps["ryze_blast"]   = loadScaled("skill_ryze_blast.png", 48, 48);
+    skillEffectPixmaps["soraka_heal"]  = loadScaled("skill_soraka_heal.png", 80, 80);
+    skillEffectPixmaps["leona_shield"] = loadScaled("skill_leona_shield.png", 48, 48);
+    skillEffectPixmaps["ashe_arrow"]   = loadScaled("skill_ashe_arrow.png", 48, 48);
+    skillEffectPixmaps["jhin_snipe"]   = loadScaled("skill_jhin_snipe.png", 48, 48);
+}
+
+QPixmap MainWindow::getHeroPixmap(Unit* u) {
+    if (!u) return QPixmap();
+    if (u->owner == Owner::EnemyCtrl) {
+        return (u->x % 2 == 0) ? enemyPixmap1 : enemyPixmap2;
+    }
+    QString name = QString::fromStdString(u->name);
+    if (heroPixmaps.contains(name)) {
+        return heroPixmaps[name];
+    }
+    return QPixmap();
 }
 
 void MainWindow::drawStartMenu(QPainter& painter) {
@@ -76,7 +205,7 @@ void MainWindow::drawStartMenu(QPainter& painter) {
 
     painter.setFont(QFont("Microsoft YaHei", 11));
     painter.setPen(QColor(80, 90, 105));
-    painter.drawText(QRect(0, 165, width(), 30), Qt::AlignCenter, "开始新游戏，或从历史存档继续。");
+    painter.drawText(QRect(0, 155, width(), 30), Qt::AlignCenter, "开始新游戏，或从历史存档继续。");
 
     painter.setBrush(QColor(74, 132, 210));
     painter.setPen(QPen(QColor(46, 94, 160), 1));
@@ -84,6 +213,12 @@ void MainWindow::drawStartMenu(QPainter& painter) {
     painter.setPen(Qt::white);
     painter.setFont(QFont("Microsoft YaHei", 12, QFont::Bold));
     painter.drawText(MENU_START_RECT, Qt::AlignCenter, "开始新游戏");
+
+    painter.setBrush(QColor(155, 120, 60));
+    painter.setPen(QPen(QColor(120, 85, 30), 1));
+    painter.drawRect(MENU_HELP_RECT);
+    painter.setPen(Qt::white);
+    painter.drawText(MENU_HELP_RECT, Qt::AlignCenter, "游戏说明");
 
     painter.setBrush(QColor(92, 170, 120));
     painter.setPen(QPen(QColor(52, 125, 82), 1));
@@ -132,6 +267,13 @@ bool MainWindow::handleStartMenuClick(const QPoint& pos) {
         return true;
     }
 
+    if (MENU_HELP_RECT.contains(pos)) {
+        showManual = true;
+        manualScrollOffset = 0;
+        update();
+        return true;
+    }
+
     if (MENU_SAVE_RECT.contains(pos)) {
         gameMgr->saveGame(createTimestampSavePath());
         refreshSaveList();
@@ -155,618 +297,403 @@ bool MainWindow::handleStartMenuClick(const QPoint& pos) {
 
     return false;
 }
-// --- 绘图逻辑：每当执行 update() 时，系统会自动调用这个函数 ---
-// void MainWindow::paintEvent(QPaintEvent *event) {
-//     QPainter painter(this);
-//     painter.setRenderHint(QPainter::Antialiasing);
 
-//     // ==================== 1. 绘制棋盘网格 ====================
-//     for(int i = 0; i < 8; i++) {
-//         for(int j = 0; j < 8; j++) {
-//             // 上半场红色（敌方），下半场蓝色（我方）
-//             painter.setBrush(j < 4 ? QColor(255, 230, 230) : QColor(230, 230, 255));
-//             painter.setPen(QColor(200, 200, 200));
-//             painter.drawRect(OFFSET_X + i*CELL_SIZE, OFFSET_Y + j*CELL_SIZE, CELL_SIZE, CELL_SIZE);
+QString MainWindow::getHeroSkillDesc(const std::string& name) {
+    if (name == "Garen") return "【旋风斩】对周围3x3范围造成80点AOE伤害";
+    if (name == "Ryze")  return "【超负荷法球】对目标造成150点法术伤害";
+    if (name == "Soraka") return "【祈愿】为全场友军回复80点生命值";
+    if (name == "Leona") return "【日蚀】对目标造成120伤害并眩晕";
+    if (name == "Ashe")  return "【万箭齐发】纵向3格AOE各100点伤害";
+    if (name == "Jhin")  return "【完美谢幕】锁定最低血量敌人造成200点伤害";
+    return "未知技能";
+}
 
-//             Unit* u = gameMgr->getUnitOnBoard(i, j);
-//             if(u && u != selectedUnit) {
-//                 // 根据阵营染颜色
-//                 painter.setBrush(u->owner == Owner::PlayerCtrl ? QColor(50, 120, 240) : QColor(240, 60, 60));
-//                 painter.setPen(Qt::NoPen);
+void MainWindow::drawPauseMenu(QPainter& painter) {
+    painter.fillRect(rect(), QColor(0, 0, 0, 160));
 
-//                 // 绘制英雄主体圆圈
-//                 int px = OFFSET_X + i * CELL_SIZE;
-//                 int py = OFFSET_Y + j * CELL_SIZE;
-//                 painter.drawEllipse(px + 5, py + 5, 50, 50);
-//                 // 在 mainwindow.cpp 的 paintEvent 绘制棋盘英雄的循环内
-//                 // 绘制完圆圈主体后：
+    int panelW = 260, panelH = 170;
+    int px = (width() - panelW) / 2, py = (height() - panelH) / 2;
+    QRect panel(px, py, panelW, panelH);
 
-//                 if (u->owner == Owner::PlayerCtrl) {
-//                     painter.setPen(Qt::NoPen);
-//                     painter.setBrush(QColor(255, 215, 0)); // 金色代表星星
+    painter.setBrush(QColor(40, 44, 52));
+    painter.setPen(QPen(QColor(80, 90, 110), 2));
+    painter.drawRoundedRect(panel, 12, 12);
 
-//                     // 根据 star 数量画小方块或星星图标
-//                     for (int k = 0; k < u->star; k++) {
-//                         // 在圆圈上方排队画小星星
-//                         int starSize = 8;
-//                         int startX = px + (50 - u->star * 10) / 2; // 居中排布
-//                         painter.drawRect(startX + k * 12, py - 5, starSize, starSize);
-//                     }
-//                 }
-//                 // ✨ 如果在施法(Casting)，加一圈耀眼的金色边框效果！
-//                 if (u->state == UnitState::Casting) {
-//                     painter.setPen(QPen(QColor(255, 215, 0), 3));
-//                     painter.setBrush(Qt::NoBrush);
-//                     painter.drawEllipse(px + 3, py + 3, 54, 54);
-//                 }
+    painter.setPen(QColor(220, 220, 240));
+    painter.setFont(QFont("Microsoft YaHei", 18, QFont::Bold));
+    painter.drawText(QRect(px, py + 6, panelW, 36), Qt::AlignCenter, "游戏暂停");
 
-//                 // ==================== 动态绘制血条与蓝条 ====================
-//                 // 血条底色（黑）
-//                 painter.setPen(Qt::NoPen);
-//                 painter.setBrush(Qt::black);
-//                 painter.drawRect(px + 5, py + 2, 50, 4);
-//                 // 血条当前值（绿）
-//                 painter.setBrush(Qt::green);
-//                 float hpRatio = std::max(0.0f, (float)u->hp / u->maxHp);
-//                 painter.drawRect(px + 5, py + 2, (int)(50 * hpRatio), 4);
+    QRect continueBtn(px + 30, py + 50, panelW - 60, 38);
+    painter.setBrush(QColor(74, 132, 210));
+    painter.setPen(QPen(QColor(46, 94, 160), 1));
+    painter.drawRoundedRect(continueBtn, 6, 6);
+    painter.setPen(Qt::white);
+    painter.setFont(QFont("Microsoft YaHei", 12, QFont::Bold));
+    painter.drawText(continueBtn, Qt::AlignCenter, "继续游戏");
 
-//                 // 蓝条（蓝，如果有最大法力值）
-//                 if(u->maxMana > 0) {
-//                     painter.setBrush(Qt::black);
-//                     painter.drawRect(px + 5, py + 7, 50, 4);
-//                     painter.setBrush(Qt::cyan);
-//                     float manaRatio = std::max(0.0f, (float)u->mana / u->maxMana);
-//                     painter.drawRect(px + 5, py + 7, (int)(50 * manaRatio), 4);
-//                 }
-//                 // ✨【新增】：在棋盘英雄脚下/右下角，绘制他目前穿戴的微型装备图标
-//                 for (size_t k = 0; k < u->equippedItems.size(); k++) {
-//                     Item* item = u->equippedItems[k];
-//                     QRect itemRect(px + 6 + k * 15, py + 42, 12, 12); // 微型 12x12 像素
-//                     if (item->type == ItemType::Sword) painter.setBrush(QColor(220, 20, 60));
-//                     else if (item->type == ItemType::Armor) painter.setBrush(QColor(70, 130, 180));
-//                     else if (item->type == ItemType::Glove) painter.setBrush(QColor(46, 139, 87));
-//                     else if (item->type == ItemType::Crystal) painter.setBrush(QColor(30, 144, 255));
-//                     painter.setPen(QPen(Qt::white, 1));
-//                     painter.drawRect(itemRect);
-//                 }
-//             }
-//         }
-//     }
+    QRect exitBtn(px + 30, py + 104, panelW - 60, 38);
+    painter.setBrush(QColor(200, 70, 70));
+    painter.setPen(QPen(QColor(150, 40, 40), 1));
+    painter.drawRoundedRect(exitBtn, 6, 6);
+    painter.setPen(Qt::white);
+    painter.drawText(exitBtn, Qt::AlignCenter, "返回主菜单 (自动保存)");
+}
 
-//     // ==================== 2. 绘制备战区 ====================
-//     for(int i = 0; i < 8; i++) {
-//         painter.setBrush(QColor(220, 220, 220));
-//         painter.setPen(QColor(160, 160, 160));
-//         painter.drawRect(OFFSET_X + i*CELL_SIZE, BENCH_Y, CELL_SIZE, CELL_SIZE);
+bool MainWindow::handlePauseMenuClick(const QPoint& pos) {
+    int panelW = 260, panelH = 170;
+    int px = (width() - panelW) / 2, py = (height() - panelH) / 2;
 
-//         Unit* u = gameMgr->getUnitOnBench(i);
-//         if(u && u != selectedUnit) {
-//             painter.setBrush(QColor(50, 120, 240));
-//             painter.setPen(Qt::NoPen);
-//             painter.drawEllipse(OFFSET_X + i*CELL_SIZE + 5, BENCH_Y + 5, 50, 50);
-//             // ✨【新增】：备战区英雄圆圈内同样展示他的神装微型图标
-//             for (size_t k = 0; k < u->equippedItems.size(); k++) {
-//                 Item* item = u->equippedItems[k];
-//                 QRect itemRect(px + 6 + k * 15, BENCH_Y + 42, 12, 12);
-//                 if (item->type == ItemType::Sword) painter.setBrush(QColor(220, 20, 60));
-//                 else if (item->type == ItemType::Armor) painter.setBrush(QColor(70, 130, 180));
-//                 else if (item->type == ItemType::Glove) painter.setBrush(QColor(46, 139, 87));
-//                 else if (item->type == ItemType::Crystal) painter.setBrush(QColor(30, 144, 255));
-//                 painter.setPen(QPen(Qt::white, 1));
-//                 painter.drawRect(itemRect);
-//             }
-//         }
-//     }
+    QRect continueBtn(px + 30, py + 50, panelW - 60, 38);
+    if (continueBtn.contains(pos)) {
+        isPaused = false;
+        update();
+        return true;
+    }
 
-//     // ==================== 3. 绘制拖拽中的单位 ====================
-//     if(selectedUnit) {
-//         painter.setBrush(QColor(255, 255, 0, 150));
-//         painter.setPen(Qt::NoPen);
-//         painter.drawEllipse(dragPos.x() - 25, dragPos.y() - 25, 50, 50);
-//     }
-//     // ✨【新增】：绘制随鼠标移动的拖拽中装备
-//     if(isDraggingItem && selectedItemIndex != -1 && selectedItemIndex < (int)gameMgr->itemBench.size()) {
-//         Item* draggingItem = gameMgr->itemBench[selectedItemIndex];
-//         QRect dragRect(dragPos.x() - ITEM_SIZE/2, dragPos.y() - ITEM_SIZE/2, ITEM_SIZE, ITEM_SIZE);
+    QRect exitBtn(px + 30, py + 104, panelW - 60, 38);
+    if (exitBtn.contains(pos)) {
+        gameMgr->saveGame(createTimestampSavePath());
+        refreshSaveList();
+        isPaused = false;
+        inStartMenu = true;
+        showManual = false;
+        resetInteractionState();
+        update();
+        return true;
+    }
+    return false;
+}
 
-//         if (draggingItem->type == ItemType::Sword) painter.setBrush(QColor(220, 20, 60));
-//         else if (draggingItem->type == ItemType::Armor) painter.setBrush(QColor(70, 130, 180));
-//         else if (draggingItem->type == ItemType::Glove) painter.setBrush(QColor(46, 139, 87));
-//         else if (draggingItem->type == ItemType::Crystal) painter.setBrush(QColor(30, 144, 255));
+void MainWindow::drawHelpScreen(QPainter& painter) {
+    painter.fillRect(rect(), QColor(30, 35, 45));
 
-//         painter.setPen(QPen(Qt::white, 2)); // 耀眼的白色拖拽轮廓
-//         painter.drawRect(dragRect);
-//         painter.setPen(Qt::white);
-//         painter.setFont(QFont("Microsoft YaHei", 8, QFont::Bold));
-//         painter.drawText(dragRect, Qt::AlignCenter, QString::fromStdString(draggingItem->name));
-//     }
+    painter.setPen(QColor(220, 220, 240));
+    painter.setFont(QFont("Microsoft YaHei", 20, QFont::Bold));
+    painter.drawText(QRect(0, 20, width(), 40), Qt::AlignCenter, "游戏说明 —— Synera Auto-Arena");
 
-//     // ==================== 4. 绘制右侧综合面板与全局资产 ====================
-//     painter.setPen(Qt::black);
-//     QFont infoFont = painter.font();
-//     infoFont.setPointSize(11);
-//     infoFont.setBold(true);
-//     painter.setFont(infoFont);
+    painter.setPen(QColor(140, 150, 170));
+    painter.setFont(QFont("Microsoft YaHei", 9));
+    painter.drawText(QRect(0, 58, width(), 20), Qt::AlignCenter, "点击任意位置或按 ESC 返回");
 
-//     painter.drawText(PANEL_X, OFFSET_Y, "当前关卡: 第 " + QString::number(gameMgr->getCurrentRound()) + " 轮");
+    const int textX = 40, startY = 90;
+    int y = startY + manualScrollOffset;
+    const int lineH = 16;
 
-//     QString stateStr;
-//     if (gameMgr->getState() == GameState::Preparation) {
-//         stateStr = "【准备阶段】\n操作：拖拽排兵布阵\n快捷键：[空格]开战";
-//     } else if (gameMgr->getState() == GameState::Battle) {
-//         stateStr = "【战斗进行中...】\n英雄正在自动寻路与施法";
-//     } else {
-//         stateStr = "【回合结算中】";
-//     }
+    struct Line { QString text; QColor color; int size; bool bold; };
+    std::vector<Line> lines = {
+        {"【游戏目标】", QColor(74, 220, 120), 11, true},
+        {"通过商店购买英雄、搭配羁绊、合成装备，在8x8战场上排兵布阵，击败逐轮增强的敌人。", QColor(200, 200, 210), 9, false},
+        {"", QColor(0,0,0), 9, false},
+        {"【操作指南】", QColor(74, 180, 240), 11, true},
+        {"点击商店卡片购买英雄 | 拖拽英雄到棋盘第5-8行 | 拖拽装备到英雄身上穿戴", QColor(200, 200, 210), 9, false},
+        {"空格键开始战斗 | S键快速保存 | L键快速读取 | ESC键暂停", QColor(200, 200, 210), 9, false},
+        {"", QColor(0,0,0), 9, false},
+        {"【六位英雄】", QColor(240, 180, 50), 11, true},
+        {"盖伦(1G/Vanguard) 450HP/35ATK/近战 - 旋风斩: 3x3范围80点AOE", QColor(200, 200, 210), 9, false},
+        {"瑞兹(2G/Mage) 300HP/45ATK/射程4 - 超负荷: 单体150点法术伤害", QColor(200, 200, 210), 9, false},
+        {"索拉卡(2G/Healer) 250HP/20ATK/射程3 - 祈愿: 全场友军回复80生命", QColor(200, 200, 210), 9, false},
+        {"蕾欧娜(2G/Knight) 480HP/28ATK/近战 - 日蚀: 单体120伤害+眩晕", QColor(200, 200, 210), 9, false},
+        {"艾希(2G/Knight) 260HP/42ATK/射程5 - 万箭齐发: 纵向3格各100伤害", QColor(200, 200, 210), 9, false},
+        {"烬(2G/Knight) 240HP/60ATK/射程4 - 完美谢幕: 锁定最低血敌人200伤害", QColor(200, 200, 210), 9, false},
+        {"", QColor(0,0,0), 9, false},
+        {"【羁绊系统】", QColor(200, 120, 220), 11, true},
+        {"Vanguard(先锋)>=1名: 所有先锋+120生命", QColor(200, 200, 210), 9, false},
+        {"Mage(法师)>=2名: 所有法师最大法力-20", QColor(200, 200, 210), 9, false},
+        {"Knight(骑士)>=2名: 全体+100生命、+15攻击", QColor(200, 200, 210), 9, false},
+        {"Healer(治愈者)>=2名: 全体+80生命、+5攻击", QColor(200, 200, 210), 9, false},
+        {"", QColor(0,0,0), 9, false},
+        {"【装备系统】", QColor(220, 80, 60), 11, true},
+        {"铁剑(+15攻击) | 锁子甲(+150生命) | 急速手套(+20%攻速) | 蓝水晶(最大法力-30)", QColor(200, 200, 210), 9, false},
+        {"两件基础装备拖到同一英雄身上自动合成高级装备:", QColor(200, 200, 210), 9, false},
+        {"铁剑+锁子甲=复活甲(阵亡满血复活) | 铁剑+手套=无尽之刃(25%暴击2倍伤害)", QColor(200, 200, 210), 9, false},
+        {"铁剑+蓝水晶=大天使之杖(初始+30法力) | 锁子甲+手套=荆棘之甲(反弹30%伤害)", QColor(200, 200, 210), 9, false},
+        {"锁子甲+蓝水晶=狂徒铠甲(每2秒回5%HP) | 手套+蓝水晶=卢登的回声(技能触发AOE)", QColor(200, 200, 210), 9, false},
+        {"2星英雄可穿戴2件装备, 1星仅1件。", QColor(200, 200, 210), 9, false},
+        {"", QColor(0,0,0), 9, false},
+        {"【升星系统】", QColor(255, 210, 50), 11, true},
+        {"3个同名同星英雄自动合成升1星, 生命和攻击x1.8倍。全局自动检测。", QColor(200, 200, 210), 9, false},
+        {"", QColor(0,0,0), 9, false},
+        {"【经济系统】", QColor(100, 200, 200), 11, true},
+        {"胜利+6G | 战败+5G | 每10金币+1利息(上限5G) | 3连击起额外奖励", QColor(200, 200, 210), 9, false},
+        {"购买经验(4G获4XP)升级提升人口上限。存钱吃利息是核心策略。", QColor(200, 200, 210), 9, false},
+    };
 
-//     painter.setPen(QColor(100, 50, 150));
-//     painter.drawText(QRect(PANEL_X, OFFSET_Y + 25, 180, 60), Qt::AlignLeft, stateStr);
+    for (const auto& line : lines) {
+        if (y > startY - lineH && y < height() - 30) {
+            painter.setFont(QFont("Microsoft YaHei", line.size, line.bold ? QFont::Bold : QFont::Normal));
+            painter.setPen(line.color);
+            painter.drawText(textX, y, line.text);
+        }
+        y += lineH;
+    }
 
-//     painter.setPen(Qt::black);
-//     painter.drawText(PANEL_X, OFFSET_Y + 100, "--------------------");
-//     painter.setPen(QColor(220, 40, 40));
-//     painter.drawText(PANEL_X, OFFSET_Y + 120, "玩家血量: " + QString::number(gameMgr->playerHp) + " / 100");
-//     painter.setPen(QColor(210, 160, 10));
-//     painter.drawText(PANEL_X, OFFSET_Y + 145, "拥有金币: " + QString::number(gameMgr->getPlayerGold()) + " G");
-//     painter.setPen(Qt::black);
-//     painter.drawText(PANEL_X, OFFSET_Y + 165, "当前人口: " + QString::number(gameMgr->getpoplulation()) + " 级");
-//     painter.drawText(PANEL_X, OFFSET_Y + 185, "--------------------");
+    painter.setPen(QColor(100, 110, 130));
+    painter.setFont(QFont("Microsoft YaHei", 8));
+    painter.drawText(QRect(0, height() - 25, width(), 20), Qt::AlignCenter, "滚轮可上下翻页");
+}
 
-//     // 5.绘制点击选中的详细属性面板
-//     if (focusedUnit) {
-//         // 稍微拉长面板高度（由200变240），为展示神装留出空间
-//         painter.setBrush(QColor(245, 245, 245));
-//         painter.setPen(QColor(180, 180, 180));
-//         painter.drawRect(PANEL_X, OFFSET_Y + 180, 160, 240);
-
-//         painter.setPen(Qt::black);
-//         painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
-//         painter.drawText(PANEL_X + 10, OFFSET_Y + 210, "【 " + QString::fromStdString(focusedUnit->name) + " 的面板 】");
-
-//         painter.setFont(QFont("Microsoft YaHei", 9, QFont::Normal));
-//         painter.drawText(PANEL_X + 10, OFFSET_Y + 235, "阵营: " + QString(focusedUnit->owner == Owner::PlayerCtrl ? "我方英雄" : "敌方怪物"));
-
-//         // ✨【优化点3实现】：动态计算并拆解展示装备带来的额外加成
-//         int bonusAtkSum = 0;
-//         int bonusHpSum = 0;
-//         for (auto* item : focusedUnit->equippedItems) {
-//             bonusAtkSum += item->bonusAtk;
-//             bonusHpSum += item->bonusHp;
-//         }
-
-//         QString hpString = "生命: " + QString::number(focusedUnit->hp) + "/" + QString::number(focusedUnit->maxHp);
-//         if (bonusHpSum > 0) hpString += " (+" + QString::number(bonusHpSum) + ")";
-//         painter.drawText(PANEL_X + 10, OFFSET_Y + 260, hpString);
-
-//         QString atkString = "攻击: " + QString::number(focusedUnit->atk);
-//         if (bonusAtkSum > 0) atkString += " (+" + QString::number(bonusAtkSum) + ")";
-//         painter.drawText(PANEL_X + 10, OFFSET_Y + 285, atkString);
-
-//         painter.drawText(PANEL_X + 10, OFFSET_Y + 310, "射程: " + QString::number(focusedUnit->range));
-
-//         QString t = "无";
-//         if(!focusedUnit->traits.empty()) t = QString::fromStdString(focusedUnit->traits[0]);
-//         painter.drawText(PANEL_X + 10, OFFSET_Y + 335, "核心羁绊: " + t);
-
-//         // ✨【优化点3续】：直观在面板底部打印穿戴的装备名字
-//         QString gearStr = "已装: ";
-//         if (focusedUnit->equippedItems.empty()) gearStr += "暂无装备";
-//         else {
-//             for (auto* item : focusedUnit->equippedItems) gearStr += "[" + QString::fromStdString(item->name) + "] ";
-//         }
-//         painter.setPen(QColor(139, 69, 19)); // 棕色复古风显示装备栏
-//         painter.setFont(QFont("Microsoft YaHei", 8, QFont::Bold));
-//         painter.drawText(PANEL_X + 10, OFFSET_Y + 365, gearStr);
-//     }
-
-//     // ==================== 6. ✨ 绘制五联抽商店卡片 ====================
-//     for (int i = 0; i < 5; i++) {
-//         // 计算每一张卡片的横坐标 X
-//         int cardX = OFFSET_X + i * (SHOP_CARD_W + SHOP_GAP);
-//         QRect cardRect(cardX, SHOP_Y, SHOP_CARD_W, SHOP_CARD_H);
-
-//         Unit* shopHero = gameMgr->getShopSlot(i);
-
-//         if (shopHero != nullptr) {
-//             // 商品存在：根据英雄名字给卡片染上不同的背景色（高级感！）
-//             if (shopHero->name == "Garen") {
-//                 painter.setBrush(QColor(230, 245, 230)); // 浅绿
-//             } else if (shopHero->name == "Ryze") {
-//                 painter.setBrush(QColor(230, 230, 250)); // 浅紫
-//             } else {
-//                 painter.setBrush(QColor(255, 250, 230)); // 浅黄
-//             }
-//             painter.setPen(QPen(QColor(140, 140, 140), 1));
-//             painter.drawRect(cardRect);
-
-//             // 绘制卡片内部文字（英雄名与价格）
-//             painter.setPen(Qt::black);
-//             painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
-//             painter.drawText(cardRect.adjusted(10, 8, 0, 0), Qt::AlignLeft, QString::fromStdString(shopHero->name));
-
-//             painter.setPen(QColor(210, 150, 10)); // 金黄色字体写价格
-//             painter.setFont(QFont("Microsoft YaHei", 8, QFont::Normal));
-//             painter.drawText(cardRect.adjusted(10, 32, -10, -5), Qt::AlignLeft | Qt::AlignVCenter, QString::number(shopHero->cost) + " 金币");
-//         } else {
-//             // 商品已被买走：画一个虚线灰色框，表示已售罄
-//             painter.setBrush(QColor(240, 240, 240));
-//             QPen dashPen(QColor(180, 180, 180), 1, Qt::DashLine);
-//             painter.setPen(dashPen);
-//             painter.drawRect(cardRect);
-
-//             painter.setPen(QColor(160, 160, 160));
-//             painter.setFont(QFont("Microsoft YaHei", 9, QFont::Normal));
-//             painter.drawText(cardRect, Qt::AlignCenter, "已售罄");
-//         }
-//     }
-
-//     // ==================== 7. ✨ 绘制“刷新商店”像素按钮 ====================
-//     // 如果在战斗中，按钮变灰不可用；在准备阶段则是耀眼的亮黄色
-//     if (gameMgr->getState() == GameState::Preparation) {
-//         painter.setBrush(QColor(255, 215, 0)); // 金黄色
-//         painter.setPen(QPen(QColor(200, 150, 0), 1));
-//     } else {
-//         painter.setBrush(QColor(200, 200, 200)); // 禁用灰色
-//         painter.setPen(QPen(QColor(160, 160, 160), 1));
-//     }
-//     painter.drawRect(REFRESH_BTN_RECT);
-
-//     // 按钮文字
-//     painter.setPen(gameMgr->getState() == GameState::Preparation ? Qt::black : QColor(120, 120, 120));
-//     painter.setFont(QFont("Microsoft YaHei", 10, QFont::Bold));
-//     painter.drawText(REFRESH_BTN_RECT, Qt::AlignCenter, "刷新商店 (2G)");
-//     // ==================== 7.5 ✨ 绘制“购买经验”像素按钮 ====================
-//     if (gameMgr->getState() == GameState::Preparation) {
-//         painter.setBrush(QColor(147, 112, 219)); // 耀眼的紫色（代表奥术/经验）
-//         painter.setPen(QPen(QColor(100, 50, 150), 1));
-//     } else {
-//         painter.setBrush(QColor(200, 200, 200)); // 战斗中禁用灰色
-//         painter.setPen(QPen(QColor(160, 160, 160), 1));
-//     }
-//     painter.drawRect(BUY_XP_BTN_RECT);
-
-//     // 按钮文字与当前经验进度
-//     painter.setPen(gameMgr->getState() == GameState::Preparation ? Qt::white : QColor(120, 120, 120));
-//     painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
-
-//     // 从 player 拿到当前经验和升级所需经验（假设你给它们写了 getter 接口，如果没有可以直接通过 gameMgr 间接获取，或者先写死显示 "购买经验 (4G)"）
-//     painter.drawText(BUY_XP_BTN_RECT, Qt::AlignCenter, "购买经验 (4G)");
-//     // ==================== 8. ✨ 绘制左侧实时羁绊看板 ====================
-//     int traitY = OFFSET_Y; // 从顶部开始排
-//     painter.setPen(Qt::black);
-//     painter.setFont(QFont("Microsoft YaHei", 10, QFont::Bold));
-//     painter.drawText(20, traitY, "【 羁绊计数 】"); // 坐标 20 刚好在屏幕最左边边缘
-//     traitY += 25;
-
-//     if (gameMgr->activeTraitsCount.empty()) {
-//         painter.setFont(QFont("Arial", 9, QFont::Normal));
-//         painter.setPen(QColor(150, 150, 150));
-//         painter.drawText(20, traitY, "暂无激活羁绊");
-//     } else {
-//         for (auto const& [trait, count] : gameMgr->activeTraitsCount) {
-//             // 根据是否达到激活标准染颜色：法师要2个，重装要1个
-//             bool isActivated = false;
-//             if (trait == "Mage" && count >= 2) isActivated = true;
-//             if (trait == "Vanguard" && count >= 1) isActivated = true;
-
-//             if (isActivated) {
-//                 painter.setBrush(QColor(255, 140, 0)); // 橙金底色（激活）
-//                 painter.setPen(Qt::NoPen);
-//                 painter.drawRect(20, traitY - 14, 110, 20);
-//                 painter.setPen(Qt::white); // 白字
-//             } else {
-//                 painter.setBrush(QColor(220, 220, 220)); // 灰底色（未激活）
-//                 painter.setPen(Qt::NoPen);
-//                 painter.drawRect(20, traitY - 14, 110, 20);
-//                 painter.setPen(QColor(100, 100, 100)); // 灰字
-//             }
-
-//             painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
-//             QString text = QString::fromStdString(trait) + " : " + QString::number(count);
-//             painter.drawText(25, traitY, text);
-//             traitY += 25;
-//         }
-//     }// ==================== ✨ 9.绘制装备库存栏 ====================
-//     painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
-//     painter.setPen(Qt::black);
-//     painter.drawText(20, ITEM_GRID_Y - 10, "【 装备库存 】");
-
-//     for (int i = 0; i < gameMgr->MAX_ITEM_BENCH; i++) {
-//         int x = 20 + i * (ITEM_SIZE + 10); // 每个格子横向间隔 10 像素
-//         QRect rect(x, ITEM_GRID_Y, ITEM_SIZE, ITEM_SIZE);
-
-//         // 绘制虚线灰色背景格
-//         painter.setBrush(QColor(240, 240, 240));
-//         painter.setPen(QPen(QColor(180, 180, 180), 1, Qt::DashLine));
-//         painter.drawRect(rect);
-
-//         // 如果这个格子里有真实装备
-//         if (i < (int)gameMgr->itemBench.size()) {
-//             Item* item = gameMgr->itemBench[i];
-
-//             // 根据装备类型，渲染高辨识度的炫彩颜色
-//             if (item->type == ItemType::Sword) painter.setBrush(QColor(220, 20, 60));     // 猩红铁剑
-//             else if (item->type == ItemType::Armor) painter.setBrush(QColor(70, 130, 180));   // 钢蓝锁子甲
-//             else if (item->type == ItemType::Glove) painter.setBrush(QColor(46, 139, 87));    // 海绿手套
-//             else if (item->type == ItemType::Crystal) painter.setBrush(QColor(30, 144, 255)); // 闪耀蓝水晶
-
-//             painter.setPen(Qt::NoPen);
-//             painter.drawRect(rect.adjusted(3, 3, -3, -3)); // 稍微往内缩一点，留出质感边框
-
-//             // 绘制装备简短文本
-//             painter.setPen(Qt::white);
-//             painter.setFont(QFont("Microsoft YaHei", 8, QFont::Bold));
-//             painter.drawText(rect, Qt::AlignCenter, QString::fromStdString(item->name));
-//         }
-//     }
-//     /// ==================== 5. ✨ 10.全屏大字报：宣布回合胜负结果 ====================
-//     // 【修复】：直接读取计时器，只要后台说需要展示胜负，就展示，不受阶段切换影响！
-//     if (gameMgr->resultDisplayTimer > 0) {
-//         painter.setBrush(QColor(0, 0, 0, 180)); // 半透明黑色遮罩背景
-//         painter.drawRect(0, 0, width(), height());
-
-//         QFont victoryFont("Microsoft YaHei", 36, QFont::Bold);
-//         painter.setFont(victoryFont);
-
-//         if (gameMgr->battleResultStr == "VICTORY") {
-//             painter.setPen(QColor(50, 255, 50)); // 绿字胜利
-//             painter.drawText(rect(), Qt::AlignCenter, "VICTORY\n回合胜利！");
-//         } else if (gameMgr->battleResultStr == "DEFEAT") {
-//             painter.setPen(QColor(255, 50, 50)); // 红字失败
-//             painter.drawText(rect(), Qt::AlignCenter, "DEFEAT\n回合失败！");
-//         } else if (gameMgr->battleResultStr == "DRAW") {
-//             painter.setPen(Qt::white); // 白字平局
-//             painter.drawText(rect(), Qt::AlignCenter, "DRAW\n同归于尽！");
-//         }
-//     }
-// }
+bool MainWindow::handleHelpScreenClick(const QPoint& pos) {
+    Q_UNUSED(pos);
+    showManual = false;
+    manualScrollOffset = 0;
+    update();
+    return true;
+}
 void MainWindow::paintEvent(QPaintEvent *event) {
     QPainter painter(this);
-    painter.setRenderHint(QPainter::Antialiasing); // 开启抗锯齿，让英雄圆圈和线条边缘更平滑
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.scale(m_scaleX, m_scaleY);
 
     if (inStartMenu) {
-        drawStartMenu(painter);
+        if (showManual) {
+            drawHelpScreen(painter);
+        } else {
+            drawStartMenu(painter);
+        }
         return;
     }
 
-    // ==================== 1. 绘制棋盘网格 (8x8 战场) ====================
+    // 按 Z-Order 从底到顶依次调用模块化绘制函数，每个模块由独立函数维护，便于增删改。
+    drawBoardGrid(painter);
+    drawSkillEffects(painter);
+    drawBench(painter);
+    drawDragTargetHighlight(painter);
+    drawDragShadow(painter);
+    drawShopCards(painter);
+    drawTraitSidebar(painter);
+    drawItemBench(painter);
+    drawProjectiles(painter);
+    drawBattleResult(painter);
+    drawBottomHint(painter);
+
+    if (isPaused) { drawPauseMenu(painter); }
+}
+
+// ================================================================
+// 以下为 paintEvent 拆分出的 11 个独立绘制模块函数。
+// 每个函数只负责一块 UI 区域的绘制，相互无耦合。
+// ================================================================
+
+// 遍历 8×8 战场网格，绘制棋盘底色、单位头像、血条、蓝条、星级与穿戴装备。
+void MainWindow::drawBoardGrid(QPainter& painter) {
     for(int i = 0; i < 8; i++) {
         for(int j = 0; j < 8; j++) {
-            // 【棋盘色彩分块】：j < 4 是上半场（敌方偏红），j >= 4 是下半场（我方偏蓝）
+            // j<4=上半场敌方偏红, j>=4=下半场我方偏蓝
             painter.setBrush(j < 4 ? QColor(255, 230, 230) : QColor(230, 230, 255));
-            painter.setPen(QColor(200, 200, 200)); // 浅灰色网格线
+            painter.setPen(QColor(200, 200, 200));
             painter.drawRect(OFFSET_X + i*CELL_SIZE, OFFSET_Y + j*CELL_SIZE, CELL_SIZE, CELL_SIZE);
 
-            // 检查当前格子（i, j）上有没有存活的单位（排除当前正被鼠标提起来拖拽的英雄）
+            // 跳过正被拖拽的单位，避免绘出残影
             Unit* u = gameMgr->getUnitOnBoard(i, j);
-            if(u && u != selectedUnit) {
-                // 【阵营染色】：我方英雄染蓝色，敌方怪物染红色
-                painter.setBrush(u->owner == Owner::PlayerCtrl ? QColor(50, 120, 240) : QColor(240, 60, 60));
-                painter.setPen(Qt::NoPen); // 英雄主体不画边框
+            if(!u || u == selectedUnit) continue;
 
-                // 计算当前英雄在窗口中的绝对像素左上角坐标（px, py）
-                int px = OFFSET_X + i * CELL_SIZE;
-                int py = OFFSET_Y + j * CELL_SIZE;
-                // 在网格居中画一个 50x50 的圆形代表英雄
-                painter.drawEllipse(px + 5, py + 5, 50, 50);
+            int px = OFFSET_X + i * CELL_SIZE;
+            int py = OFFSET_Y + j * CELL_SIZE;
 
-                // --- 绘制英雄星级 (仅我方显示) ---
-                if (u->owner == Owner::PlayerCtrl) {
-                    painter.setPen(Qt::NoPen);
-                    painter.setBrush(QColor(255, 215, 0)); // 金黄色
-                    // 循环星级数量，在英雄头顶排队画出金色小方块代表星星
-                    for (int k = 0; k < u->star; k++) {
-                        int starSize = 8;
-                        int startX = px + (50 - u->star * 10) / 2; // 根据星级数量自动居中排列
-                        painter.drawRect(startX + k * 12, py - 5, starSize, starSize);
-                    }
-                }
-
-                // --- 绘制大本营/技能施法特效 ---
-                if (u->state == UnitState::Casting) {
-                    painter.setPen(QPen(QColor(255, 215, 0), 3)); // 3像素宽的金色耀眼外圈
-                    painter.setBrush(Qt::NoBrush);
-                    painter.drawEllipse(px + 3, py + 3, 54, 54);
-                }
-
-                // --- 动态血条渲染 (绿条) ---
+            // 单位头像：优先用PNG图片，其次用纯色圆形
+            QPixmap heroPix = getHeroPixmap(u);
+            if (!heroPix.isNull()) {
+                painter.drawPixmap(px + 5, py + 5, 50, 50, heroPix);
+            } else {
+                painter.setBrush(heroColor(u));
                 painter.setPen(Qt::NoPen);
-                painter.setBrush(Qt::black); // 黑底座
-                painter.drawRect(px + 5, py + 2, 50, 4);
-                painter.setBrush(Qt::green); // 绿血条
-                float hpRatio = std::max(0.0f, (float)u->hp / u->maxHp); // 算血量百分比
-                painter.drawRect(px + 5, py + 2, (int)(50 * hpRatio), 4);
+                painter.drawEllipse(px + 5, py + 5, 50, 50);
+            }
 
-                // --- 动态蓝条渲染 (蓝条，仅在有最大法力值时展示) ---
-                if(u->maxMana > 0) {
-                    painter.setBrush(Qt::black); // 黑底座
-                    painter.drawRect(px + 5, py + 7, 50, 4);
-                    painter.setBrush(Qt::cyan); // 青蓝色蓝条
-                    float manaRatio = std::max(0.0f, (float)u->mana / u->maxMana); // 算蓝量百分比
-                    painter.drawRect(px + 5, py + 7, (int)(50 * manaRatio), 4);
+            // 我方单位头顶金色星级方块
+            if (u->owner == Owner::PlayerCtrl) {
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(255, 215, 0));
+                for (int k = 0; k < u->star; k++) {
+                    int startX = px + (50 - u->star * 10) / 2;
+                    painter.drawRect(startX + k * 12, py - 5, 8, 8);
                 }
+            }
 
-                // --- ✨【新增】：在棋盘英雄的脚下（右下角）渲染微型穿戴装备小方块 ---
-                for (size_t k = 0; k < u->equippedItems.size(); k++) {
-                    Item* item = u->equippedItems[k];
-                    QRect itemRect(px + 6 + k * 15, py + 42, 12, 12); // 每个装备格 12x12 像素
+            // 技能施法金色外圈特效
+            if (u->state == UnitState::Casting) {
+                painter.setPen(QPen(QColor(255, 215, 0), 3));
+                painter.setBrush(Qt::NoBrush);
+                painter.drawEllipse(px + 3, py + 3, 54, 54);
+            }
 
-                    // 匹配装备对应的代表颜色
-                    if (item->type == ItemType::Sword) painter.setBrush(QColor(220, 20, 60));      // 铁剑-猩红
-                    else if (item->type == ItemType::Armor) painter.setBrush(QColor(70, 130, 180));  // 锁子甲-钢蓝
-                    else if (item->type == ItemType::Glove) painter.setBrush(QColor(46, 139, 87));   // 手套-海绿
-                    else if (item->type == ItemType::Crystal) painter.setBrush(QColor(30, 144, 255)); // 蓝水晶-闪耀蓝
+            // 动态血量绿条（黑底+绿色百分比填充）
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(Qt::black);
+            painter.drawRect(px + 5, py + 2, 50, 4);
+            painter.setBrush(Qt::green);
+            float hpRatio = std::max(0.0f, (float)u->hp / u->maxHp);
+            painter.drawRect(px + 5, py + 2, (int)(50 * hpRatio), 4);
 
-                    painter.setPen(QPen(Qt::white, 1)); // 白色细边框提升辨识度
+            // 蓝条（法力条）：仅在有最大法力时渲染
+            if(u->maxMana > 0) {
+                painter.setBrush(Qt::black);
+                painter.drawRect(px + 5, py + 7, 50, 4);
+                painter.setBrush(Qt::cyan);
+                float manaRatio = std::max(0.0f, (float)u->mana / u->maxMana);
+                painter.drawRect(px + 5, py + 7, (int)(50 * manaRatio), 4);
+            }
+
+            // 英雄脚下微型装备图标（右下角排列）
+            for (size_t k = 0; k < u->equippedItems.size(); k++) {
+                Item* item = u->equippedItems[k];
+                QRect itemRect(px + 6 + k * 15, py + 42, 12, 12);
+                if (itemPixmaps.count(item->type)) {
+                    painter.drawPixmap(itemRect, itemPixmaps[item->type]);
+                } else {
+                    if (item->type == ItemType::Sword) painter.setBrush(QColor(220, 20, 60));
+                    else if (item->type == ItemType::Armor) painter.setBrush(QColor(70, 130, 180));
+                    else if (item->type == ItemType::Glove) painter.setBrush(QColor(46, 139, 87));
+                    else if (item->type == ItemType::Crystal) painter.setBrush(QColor(30, 144, 255));
+                    else painter.setBrush(itemColor(item));
+                    painter.setPen(QPen(Qt::white, 1));
                     painter.drawRect(itemRect);
                 }
             }
         }
     }
+}
 
-    // ==================== 2. 绘制备战区格子 (下方横排 8 格) ====================
+// 技能施法时的半透明特效叠加层，覆盖在棋盘单位上方展示。
+void MainWindow::drawSkillEffects(QPainter& painter) {
+    for (const auto& e : gameMgr->skillEffects) {
+        int px = OFFSET_X + e.x * CELL_SIZE;
+        int py = OFFSET_Y + e.y * CELL_SIZE;
+        QString key = QString::fromStdString(e.skillName);
+        painter.setOpacity(0.45);
+        if (skillEffectPixmaps.contains(key)) {
+            QPixmap& sp = skillEffectPixmaps[key];
+            painter.drawPixmap(px - (sp.width() - CELL_SIZE) / 2,
+                               py - (sp.height() - CELL_SIZE) / 2, sp);
+        } else {
+            painter.setBrush(QColor(255, 255, 255, 100));
+            painter.setPen(Qt::NoPen);
+            painter.drawEllipse(px + 5, py + 5, 50, 50);
+        }
+        painter.setOpacity(1.0);
+    }
+}
+
+// 下方备战区 8 格横排：浅灰背景 + 待命英雄 + 装备图标。
+void MainWindow::drawBench(QPainter& painter) {
     for(int i = 0; i < 8; i++) {
-        painter.setBrush(QColor(220, 220, 220)); // 浅灰色备战格背景
+        painter.setBrush(QColor(220, 220, 220));
         painter.setPen(QColor(160, 160, 160));
         painter.drawRect(OFFSET_X + i*CELL_SIZE, BENCH_Y, CELL_SIZE, CELL_SIZE);
 
-        // 检查备战席第 i 个位置有没有英雄
         Unit* u = gameMgr->getUnitOnBench(i);
-        if(u && u != selectedUnit) {
-            int px = OFFSET_X + i * CELL_SIZE;
-            painter.setBrush(QColor(50, 120, 240)); // 我方统一蓝色圆圈
+        if(!u || u == selectedUnit) continue;
+
+        int px = OFFSET_X + i * CELL_SIZE;
+        QPixmap heroPix = getHeroPixmap(u);
+        if (!heroPix.isNull()) {
+            painter.drawPixmap(px + 5, BENCH_Y + 5, 50, 50, heroPix);
+        } else {
+            painter.setBrush(heroColor(u));
             painter.setPen(Qt::NoPen);
             painter.drawEllipse(px + 5, BENCH_Y + 5, 50, 50);
+        }
 
-            // --- ✨【新增】：备战区的英雄在穿上装备后，圆圈内同样绘制神装微型格 ---
-            for (size_t k = 0; k < u->equippedItems.size(); k++) {
-                Item* item = u->equippedItems[k];
-                QRect itemRect(px + 6 + k * 15, BENCH_Y + 42, 12, 12);
-
+        // 备战区英雄脚下的微型穿戴装备
+        for (size_t k = 0; k < u->equippedItems.size(); k++) {
+            Item* item = u->equippedItems[k];
+            QRect itemRect(px + 6 + k * 15, BENCH_Y + 42, 12, 12);
+            if (itemPixmaps.count(item->type)) {
+                painter.drawPixmap(itemRect, itemPixmaps[item->type]);
+            } else {
                 if (item->type == ItemType::Sword) painter.setBrush(QColor(220, 20, 60));
                 else if (item->type == ItemType::Armor) painter.setBrush(QColor(70, 130, 180));
                 else if (item->type == ItemType::Glove) painter.setBrush(QColor(46, 139, 87));
                 else if (item->type == ItemType::Crystal) painter.setBrush(QColor(30, 144, 255));
-
+                else painter.setBrush(itemColor(item));
                 painter.setPen(QPen(Qt::white, 1));
                 painter.drawRect(itemRect);
             }
         }
     }
+}
 
-    // ==================== 3. 绘制拖拽中的动态阴影 (英雄 / 装备) ====================
-    // 状态 A：如果当前手里抓着一只英雄，在鼠标坐标(dragPos)处画一个半透明发光黄圈跟随
+// 拖拽英雄时，在目标位置绘制绿色(合法)或红色(非法)的高亮边框。
+void MainWindow::drawDragTargetHighlight(QPainter& painter) {
+    if (!selectedUnit || dragHoverTarget.x() < 0) return;
+
+    int hx = dragHoverTarget.x();
+    int hy = dragHoverTarget.y();
+    if (dragHoverIsBench) {
+        int px = OFFSET_X + hx * CELL_SIZE;
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(dragHoverValid ? QColor(100, 220, 100) : QColor(220, 100, 100), 3));
+        painter.drawRect(px, BENCH_Y, CELL_SIZE, CELL_SIZE);
+    } else if (hy >= 0 && hy < 8) {
+        int px = OFFSET_X + hx * CELL_SIZE;
+        int py = OFFSET_Y + hy * CELL_SIZE;
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(dragHoverValid ? QColor(100, 220, 100) : QColor(220, 100, 100), 3));
+        painter.drawRect(px, py, CELL_SIZE, CELL_SIZE);
+    }
+}
+
+// 鼠标拖拽跟随阴影：英雄为半透明黄色圆圈，装备为带标签的彩色方块。
+void MainWindow::drawDragShadow(QPainter& painter) {
+    // 英雄拖拽半透明黄圈跟随鼠标
     if(selectedUnit) {
-        painter.setBrush(QColor(255, 255, 0, 150)); // 最后的 150 代表 Alpha 透明度
+        painter.setBrush(QColor(255, 255, 0, 150));
         painter.setPen(Qt::NoPen);
-        painter.drawEllipse(dragPos.x() - 25, dragPos.y() - 25, 50, 50); // 以当前鼠标为圆心
+        painter.drawEllipse(dragPos.x() - 25, dragPos.y() - 25, 50, 50);
     }
 
-    // 状态 B：✨【新增】：如果手里抓着一件装备，在鼠标坐标(dragPos)画一个高辨识度的小方块跟随
+    // 装备拖拽彩色方块跟随鼠标，印装备名称
     if(isDraggingItem && selectedItemIndex != -1 && selectedItemIndex < (int)gameMgr->itemBench.size()) {
         Item* draggingItem = gameMgr->itemBench[selectedItemIndex];
-        QRect dragRect(dragPos.x() - ITEM_SIZE/2, dragPos.y() - ITEM_SIZE/2, ITEM_SIZE, ITEM_SIZE); // 居中鼠标
+        QRect dragRect(dragPos.x() - ITEM_SIZE/2, dragPos.y() - ITEM_SIZE/2, ITEM_SIZE, ITEM_SIZE);
 
         if (draggingItem->type == ItemType::Sword) painter.setBrush(QColor(220, 20, 60));
         else if (draggingItem->type == ItemType::Armor) painter.setBrush(QColor(70, 130, 180));
         else if (draggingItem->type == ItemType::Glove) painter.setBrush(QColor(46, 139, 87));
         else if (draggingItem->type == ItemType::Crystal) painter.setBrush(QColor(30, 144, 255));
+        else painter.setBrush(itemColor(draggingItem));
 
-        painter.setPen(QPen(Qt::white, 2)); // 耀眼的纯白拖拽边框
+        painter.setPen(QPen(Qt::white, 2));
         painter.drawRect(dragRect);
         painter.setPen(Qt::white);
         painter.setFont(QFont("Microsoft YaHei", 8, QFont::Bold));
-        painter.drawText(dragRect, Qt::AlignCenter, QString::fromStdString(draggingItem->name)); // 把装备字样印在正中央
+        painter.drawText(dragRect, Qt::AlignCenter, QString::fromStdString(draggingItem->name));
     }
+}
 
-    // ==================== 4. 绘制右侧综合面板与全局资产 (金币/血量/人口) ====================
-    painter.setPen(Qt::black);
-    QFont infoFont = painter.font();
-    infoFont.setPointSize(11);
-    infoFont.setBold(true);
-    painter.setFont(infoFont);
-
-    // 打印当前的关卡轮数
-    painter.drawText(PANEL_X, OFFSET_Y, "当前关卡: 第 " + QString::number(gameMgr->getCurrentRound()) + " 轮");
-
-    // 转换当前游戏阶段的状态机文案
-    QString stateStr;
-    if (gameMgr->getState() == GameState::Preparation) {
-        stateStr = "【准备阶段】\n操作：拖拽排兵布阵\n快捷键：[空格]开战";
-    } else if (gameMgr->getState() == GameState::Battle) {
-        stateStr = "【战斗进行中...】\n英雄正在自动寻路与施法";
-    } else {
-        stateStr = "【回合结算中】";
-    }
-
-    painter.setPen(QColor(100, 50, 150)); // 紫色加粗展示阶段状态
-    painter.drawText(QRect(PANEL_X, OFFSET_Y + 25, 180, 60), Qt::AlignLeft, stateStr);
-
-    // 渲染大本营实时玩家核心数值
-    painter.setPen(Qt::black);
-    painter.drawText(PANEL_X, OFFSET_Y + 100, "--------------------");
-    painter.setPen(QColor(220, 40, 40)); // 红色写血量
-    painter.drawText(PANEL_X, OFFSET_Y + 120, "玩家血量: " + QString::number(gameMgr->playerHp) + " / 100");
-    painter.setPen(QColor(210, 160, 10)); // 金黄色写金币
-    painter.drawText(PANEL_X, OFFSET_Y + 145, "拥有金币: " + QString::number(gameMgr->getPlayerGold()) + " G");
-    painter.setPen(Qt::black);
-    painter.drawText(PANEL_X, OFFSET_Y + 165, "当前人口: " + QString::number(gameMgr->getpoplulation()) + " 级");
-    painter.drawText(PANEL_X, OFFSET_Y + 185, "--------------------");
-
-    // ==================== 5. 绘制点击选中的详细属性面板 ====================
-    if (focusedUnit) {
-        // 【调优】：面板框高拉长到 240 像素，确保底部塞得下新加的装备信息
-        painter.setBrush(QColor(245, 245, 245));
-        painter.setPen(QColor(180, 180, 180));
-        painter.drawRect(PANEL_X, OFFSET_Y + 180, 160, 240);
-
-        painter.setPen(Qt::black);
-        painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
-        painter.drawText(PANEL_X + 10, OFFSET_Y + 210, "【 " + QString::fromStdString(focusedUnit->name) + " 的面板 】");
-
-        painter.setFont(QFont("Microsoft YaHei", 9, QFont::Normal));
-        painter.drawText(PANEL_X + 10, OFFSET_Y + 235, "阵营: " + QString(focusedUnit->owner == Owner::PlayerCtrl ? "我方英雄" : "敌方怪物"));
-
-        // ✨【优化点3核心实现】：循环累加计算该单位当前所有神装的额外属性加成综合
-        int bonusAtkSum = 0;
-        int bonusHpSum = 0;
-        for (auto* item : focusedUnit->equippedItems) {
-            bonusAtkSum += item->bonusAtk;
-            bonusHpSum += item->bonusHp;
-        }
-
-        // 拆解渲染生命值数值。如果加成大于0，拼上 "(+150)" 后缀
-        QString hpString = "生命: " + QString::number(focusedUnit->hp) + "/" + QString::number(focusedUnit->maxHp);
-        if (bonusHpSum > 0) hpString += " (+" + QString::number(bonusHpSum) + ")";
-        painter.drawText(PANEL_X + 10, OFFSET_Y + 260, hpString);
-
-        // 拆解渲染攻击力面板。如果加成大于0，拼上 "(+15)" 后缀
-        QString atkString = "攻击: " + QString::number(focusedUnit->atk);
-        if (bonusAtkSum > 0) atkString += " (+" + QString::number(bonusAtkSum) + ")";
-        painter.drawText(PANEL_X + 10, OFFSET_Y + 285, atkString);
-
-        painter.drawText(PANEL_X + 10, OFFSET_Y + 310, "射程: " + QString::number(focusedUnit->range));
-
-        QString t = "无";
-        if(!focusedUnit->traits.empty()) t = QString::fromStdString(focusedUnit->traits[0]);
-        painter.drawText(PANEL_X + 10, OFFSET_Y + 335, "核心羁绊: " + t);
-
-        // ✨【优化点3续】：直观在属性框最底部显示穿戴的装备中文字样
-        QString gearStr = "已装: ";
-        if (focusedUnit->equippedItems.empty()) gearStr += "暂无装备";
-        else {
-            for (auto* item : focusedUnit->equippedItems) gearStr += "[" + QString::fromStdString(item->name) + "] ";
-        }
-        painter.setPen(QColor(139, 69, 19)); // 棕色复古字，突出神装效果
-        painter.setFont(QFont("Microsoft YaHei", 8, QFont::Bold));
-        painter.drawText(PANEL_X + 10, OFFSET_Y + 365, gearStr);
-    }
-
-    // ==================== 6. 绘制五联抽商店卡片 ====================
+// 底部五联抽商店：5 张英雄卡片（名称、羁绊、价格）或"已售罄"空位。
+void MainWindow::drawShopCards(QPainter& painter) {
     for (int i = 0; i < 5; i++) {
-        int cardX = OFFSET_X + i * (SHOP_CARD_W + SHOP_GAP); // 动态等距算横向 X 像素点
+        int cardX = OFFSET_X + i * (SHOP_CARD_W + SHOP_GAP);
         QRect cardRect(cardX, SHOP_Y, SHOP_CARD_W, SHOP_CARD_H);
         Unit* shopHero = gameMgr->getShopSlot(i);
 
         if (shopHero != nullptr) {
-            // 根据商品名字给格子染高级感浅色背景
-            if (shopHero->name == "Garen") painter.setBrush(QColor(230, 245, 230));     // 浅绿
-            else if (shopHero->name == "Ryze") painter.setBrush(QColor(230, 230, 250)); // 浅紫
-            else painter.setBrush(QColor(255, 250, 230));                             // 浅黄
+            // 按英雄名分配独特的浅色背景，一目了然
+            if (shopHero->name == "Garen") painter.setBrush(QColor(230, 245, 230));
+            else if (shopHero->name == "Ryze") painter.setBrush(QColor(230, 230, 250));
+            else if (shopHero->name == "Soraka") painter.setBrush(QColor(225, 245, 235));
+            else if (shopHero->name == "Leona") painter.setBrush(QColor(255, 245, 220));
+            else if (shopHero->name == "Ashe") painter.setBrush(QColor(225, 240, 250));
+            else painter.setBrush(QColor(250, 235, 240));
             painter.setPen(QPen(QColor(140, 140, 140), 1));
             painter.drawRect(cardRect);
 
-            // 绘制卡片内英雄字样
             painter.setPen(Qt::black);
             painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
             painter.drawText(cardRect.adjusted(10, 8, 0, 0), Qt::AlignLeft, QString::fromStdString(shopHero->name));
 
-            // 金黄色字体写下价格
+            painter.setPen(QColor(100, 100, 180));
+            painter.setFont(QFont("Microsoft YaHei", 7));
+            QString traitStr;
+            if (!shopHero->traits.empty()) traitStr = QString::fromStdString(shopHero->traits[0]);
+            painter.drawText(cardRect.adjusted(10, 22, 0, 0), Qt::AlignLeft, traitStr);
+
             painter.setPen(QColor(210, 150, 10));
             painter.setFont(QFont("Microsoft YaHei", 8, QFont::Normal));
-            painter.drawText(cardRect.adjusted(10, 32, -10, -5), Qt::AlignLeft | Qt::AlignVCenter, QString::number(shopHero->cost) + " 金币");
+            painter.drawText(cardRect.adjusted(10, 38, -10, -5), Qt::AlignLeft | Qt::AlignVCenter,
+                             QString::number(shopHero->cost) + " 金币");
         } else {
-            // 已售罄：画灰色虚线框框防占位
             painter.setBrush(QColor(240, 240, 240));
             QPen dashPen(QColor(180, 180, 180), 1, Qt::DashLine);
             painter.setPen(dashPen);
@@ -776,50 +703,10 @@ void MainWindow::paintEvent(QPaintEvent *event) {
             painter.drawText(cardRect, Qt::AlignCenter, "已售罄");
         }
     }
+}
 
-    // ==================== 7. 绘制“刷新商店”与“购买经验”功能按钮 ====================
-    // --- 刷新按钮 ---
-    if (gameMgr->getState() == GameState::Preparation) {
-        painter.setBrush(QColor(255, 215, 0)); // 准备阶段亮黄可用
-        painter.setPen(QPen(QColor(200, 150, 0), 1));
-    } else {
-        painter.setBrush(QColor(200, 200, 200)); // 战斗中变灰禁用
-        painter.setPen(QPen(QColor(160, 160, 160), 1));
-    }
-    painter.drawRect(REFRESH_BTN_RECT);
-    painter.setPen(gameMgr->getState() == GameState::Preparation ? Qt::black : QColor(120, 120, 120));
-    painter.setFont(QFont("Microsoft YaHei", 10, QFont::Bold));
-    painter.drawText(REFRESH_BTN_RECT, Qt::AlignCenter, "刷新商店 (2G)");
-
-    // --- 升级按钮 ---
-    if (gameMgr->getState() == GameState::Preparation) {
-        painter.setBrush(QColor(147, 112, 219)); // 绚丽紫色代表法力/经验
-        painter.setPen(QPen(QColor(100, 50, 150), 1));
-    } else {
-        painter.setBrush(QColor(200, 200, 200)); // 战斗中禁用
-        painter.setPen(QPen(QColor(160, 160, 160), 1));
-    }
-    painter.drawRect(BUY_XP_BTN_RECT);
-    painter.setPen(gameMgr->getState() == GameState::Preparation ? Qt::white : QColor(120, 120, 120));
-    painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
-    painter.drawText(BUY_XP_BTN_RECT, Qt::AlignCenter, "购买经验 (4G)");
-
-    // --- 存档按钮 ---
-    painter.setBrush(QColor(90, 170, 120));
-    painter.setPen(QPen(QColor(50, 120, 80), 1));
-    painter.drawRect(SAVE_BTN_RECT);
-    painter.setPen(Qt::white);
-    painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
-    painter.drawText(SAVE_BTN_RECT, Qt::AlignCenter, "保存存档 (S)");
-
-    // --- 读档按钮 ---
-    painter.setBrush(QColor(70, 130, 190));
-    painter.setPen(QPen(QColor(40, 90, 150), 1));
-    painter.drawRect(LOAD_BTN_RECT);
-    painter.setPen(Qt::white);
-    painter.drawText(LOAD_BTN_RECT, Qt::AlignCenter, "读取存档 (L)");
-
-    // ==================== 8. 绘制左边栏实时羁绊看板 ====================
+// 左侧羁绊计数看板：按激活状态（橙色=激活 / 灰色=未激活）列出所有羁绊与计数。
+void MainWindow::drawTraitSidebar(QPainter& painter) {
     int traitY = OFFSET_Y;
     painter.setPen(Qt::black);
     painter.setFont(QFont("Microsoft YaHei", 10, QFont::Bold));
@@ -832,316 +719,358 @@ void MainWindow::paintEvent(QPaintEvent *event) {
         painter.drawText(20, traitY, "暂无激活羁绊");
     } else {
         for (auto const& [trait, count] : gameMgr->activeTraitsCount) {
-            // 条件硬编码判定羁绊是否满足生效（重装 >= 1, 法师 >= 2）
-            bool isActivated = false;
-            if (trait == "Mage" && count >= 2) isActivated = true;
-            if (trait == "Vanguard" && count >= 1) isActivated = true;
+            int threshold = 1;
+            if (trait == "Mage") threshold = 2;
+            if (trait == "Knight") threshold = 2;
+            if (trait == "Healer") threshold = 2;
+            if (trait == "Vanguard") threshold = 1;
+
+            bool isActivated = (count >= threshold);
 
             if (isActivated) {
-                painter.setBrush(QColor(255, 140, 0)); // 橙色激活高亮
+                painter.setBrush(QColor(255, 140, 0));
                 painter.setPen(Qt::NoPen);
                 painter.drawRect(20, traitY - 14, 110, 20);
                 painter.setPen(Qt::white);
             } else {
-                painter.setBrush(QColor(220, 220, 220)); // 灰色未激活
+                painter.setBrush(QColor(220, 220, 220));
                 painter.setPen(Qt::NoPen);
                 painter.drawRect(20, traitY - 14, 110, 20);
                 painter.setPen(QColor(100, 100, 100));
             }
             painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
-            QString text = QString::fromStdString(trait) + " : " + QString::number(count);
+            QString text = QString::fromStdString(trait) + " : " + QString::number(count) + "/" + QString::number(threshold);
             painter.drawText(25, traitY, text);
-            traitY += 25; // 下移，排成一列
+            traitY += 25;
         }
     }
+}
 
-    // ==================== 9. 绘制下方装备库存栏格子 ====================
+// 底部装备库存栏：虚线格子 + 装备图标 + 名称标签。
+void MainWindow::drawItemBench(QPainter& painter) {
     painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
     painter.setPen(Qt::black);
     painter.drawText(20, ITEM_GRID_Y - 10, "【 装备库存 】");
 
     for (int i = 0; i < gameMgr->MAX_ITEM_BENCH; i++) {
-        int x = 20 + i * (ITEM_SIZE + 10); // 横向每个小方块间距 10 像素
-        QRect rect(x, ITEM_GRID_Y, ITEM_SIZE, ITEM_SIZE);
-
-        painter.setBrush(QColor(240, 240, 240));
-        painter.setPen(QPen(QColor(180, 180, 180), 1, Qt::DashLine)); // 虚线画出装备槽格子
-        painter.drawRect(rect);
-
-        // 如果这个格子里确实有爆出来的空闲装备，渲染核心块
-        if (i < (int)gameMgr->itemBench.size()) {
-            Item* item = gameMgr->itemBench[i];
-            if (item->type == ItemType::Sword) painter.setBrush(QColor(220, 20, 60));
-            else if (item->type == ItemType::Armor) painter.setBrush(QColor(70, 130, 180));
-            else if (item->type == ItemType::Glove) painter.setBrush(QColor(46, 139, 87));
-            else if (item->type == ItemType::Crystal) painter.setBrush(QColor(30, 144, 255));
-
-            painter.setPen(Qt::NoPen);
-            painter.drawRect(rect.adjusted(3, 3, -3, -3)); // 缩进3像素让轮廓有悬浮质感
-
-            painter.setPen(Qt::white);
-            painter.setFont(QFont("Microsoft YaHei", 8, QFont::Bold));
-            painter.drawText(rect, Qt::AlignCenter, QString::fromStdString(item->name)); // 把它的名字画正中心
-        }
-    }
-
-    // ==================== ✨【优化点2核心实现】：全动态装备属性悬停提示面板 ====================
-    Item* inspectItem = nullptr;
-    QPoint localMouse = this->mapFromGlobal(QCursor::pos()); // 关键：抓取系统的实时鼠标像素位置，并映射转换到当前窗口
-
-    // 状态检测分支 1：如果鼠标正抓着一件装备走，直接锁定这件被拖拽的装备
-    if (isDraggingItem && selectedItemIndex != -1 && selectedItemIndex < (int)gameMgr->itemBench.size()) {
-        inspectItem = gameMgr->itemBench[selectedItemIndex];
-    }
-    // 状态检测分支 2：手里没拖，扫描鼠标此时此刻是不是单纯“悬停”在下面的某个库存槽上方
-    else {
-        for (int i = 0; i < (int)gameMgr->itemBench.size(); i++) {
-            int x = 20 + i * (ITEM_SIZE + 10);
-            QRect rect(x, ITEM_GRID_Y, ITEM_SIZE, ITEM_SIZE);
-            if (rect.contains(localMouse)) {
-                inspectItem = gameMgr->itemBench[i]; // 完美捕获悬停格
-                break;
-            }
-        }
-    }
-
-    // 如果满足任意一种查看态，在右下角（属性面板的正下方）渲染羊皮纸金边提示框
-    if (inspectItem) {
-        int tooltipY = OFFSET_Y + 435; // 紧贴着选定单位属性面板框的下方
-        painter.setBrush(QColor(255, 255, 245)); // 优雅的羊皮纸奶黄底色
-        painter.setPen(QPen(QColor(218, 165, 32), 2)); // 耀眼的暗金框线
-        painter.drawRect(PANEL_X, tooltipY, 160, 105); // 160x105大小的装备看板
-
-        // 打印装备大名
-        painter.setPen(Qt::black);
-        painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
-        painter.drawText(PANEL_X + 10, tooltipY + 20, "【 " + QString::fromStdString(inspectItem->name) + " 】");
-
-        // 亮绿色加粗字，打印装备的具体核心增益属性
-        painter.setFont(QFont("Microsoft YaHei", 9, QFont::Bold));
-        painter.setPen(QColor(34, 139, 34)); // 森林绿
-        QString bonusText;
-        if (inspectItem->type == ItemType::Sword) bonusText = "攻击力 +15";
-        else if (inspectItem->type == ItemType::Armor) bonusText = "生命值 +150";
-        else if (inspectItem->type == ItemType::Glove) bonusText = "攻击速度 +20%";
-        else if (inspectItem->type == ItemType::Crystal) bonusText = "最大法力值 -30";
-        painter.drawText(PANEL_X + 10, tooltipY + 45, bonusText);
-
-        // 深灰色小字，打印自走棋装备风味小故事描述
-        painter.setPen(QColor(110, 110, 110));
-        painter.setFont(QFont("Microsoft YaHei", 8, QFont::Normal));
-        QRect descRect(PANEL_X + 10, tooltipY + 58, 140, 42); // 限制自动换行的排版矩形范围
-        QString descText;
-        if (inspectItem->type == ItemType::Sword) descText = "锋利的生铁短剑，提供最纯粹的物理破坏力。";
-        else if (inspectItem->type == ItemType::Armor) descText = "锁扣极其紧密的半身甲，大幅强化前排肉度。";
-        else if (inspectItem->type == ItemType::Glove) descText = "轻便耐磨的纤维织物，使英雄出招迅捷如电。";
-        else if (inspectItem->type == ItemType::Crystal) descText = "封印着奥术核心，能缩短技能释放所需的法力值。";
-        painter.drawText(descRect, Qt::TextWordWrap, descText); // 开启自动折行
-    }
-
-    // ==================== 10. 全屏半透明大字报：宣布回合胜负结果 ====================
-    if (gameMgr->resultDisplayTimer > 0) {
-        painter.setBrush(QColor(0, 0, 0, 180)); // 180透明度的黑天鹅绒全屏遮罩
-        painter.drawRect(0, 0, width(), height());
-        QFont victoryFont("Microsoft YaHei", 36, QFont::Bold);
-        painter.setFont(victoryFont);
-
-        if (gameMgr->battleResultStr == "VICTORY") {
-            painter.setPen(QColor(50, 255, 50)); // 亮绿大字报
-            painter.drawText(rect(), Qt::AlignCenter, "VICTORY\n回合胜利！");
-        } else if (gameMgr->battleResultStr == "DEFEAT") {
-            painter.setPen(QColor(255, 50, 50)); // 鲜红大字报
-            painter.drawText(rect(), Qt::AlignCenter, "DEFEAT\n回合失败！");
-        } else if (gameMgr->battleResultStr == "DRAW") {
-            painter.setPen(Qt::white); // 纯白大字报
-            painter.drawText(rect(), Qt::AlignCenter, "DRAW\n同归于尽！");
-        }
-    }
-}
-
-void MainWindow::mousePressEvent(QMouseEvent *event) {
-    if (inStartMenu) {
-        handleStartMenuClick(event->pos());
-        return;
-    }
-
-    // 优先检测是否点中了装备库存格
-    for (int i = 0; i < (int)gameMgr->itemBench.size(); i++) {
         int x = 20 + i * (ITEM_SIZE + 10);
         QRect rect(x, ITEM_GRID_Y, ITEM_SIZE, ITEM_SIZE);
 
-        if (rect.contains(event->pos())) {
-            selectedItemIndex = i;
-            isDraggingItem = true;
-            dragPos = event->pos(); // ✨【新增】：记录装备拖拽的起始像素位置
+        painter.setBrush(QColor(240, 240, 240));
+        painter.setPen(QPen(QColor(180, 180, 180), 1, Qt::DashLine));
+        painter.drawRect(rect);
 
-            update();
-            return; // 成功抓取到装备，立刻返回，不触发抓英雄逻辑
-        }
-    }
-    //点刷新
-    if (REFRESH_BTN_RECT.contains(event->pos())) {
-        if (gameMgr->getState() == GameState::Preparation) {
-            gameMgr->refreshShopManual(); // 调用扣钱刷新
-            update(); // 刷新界面
-        }
-        return; // 点了按钮就直接返回，不触发下面的抓取英雄逻辑
-    }
-    //点买经验
-    if(BUY_XP_BTN_RECT.contains(event->pos())){
-        if(gameMgr->getState()==GameState::Preparation){
-            gameMgr->buyXP();
-            update();
-        }
-        return;
-    }
-    // 存档按钮：把当前局面写入 saves 目录下的新存档文件。
-    if (SAVE_BTN_RECT.contains(event->pos())) {
-        gameMgr->saveGame(createTimestampSavePath());
-        refreshSaveList();
-        update();
-        return;
-    }
-    // 读档按钮：回到初始界面，从历史存档列表选择。
-    if (LOAD_BTN_RECT.contains(event->pos())) {
-        refreshSaveList();
-        resetInteractionState();
-        inStartMenu = true;
-        update();
-        return;
-    }
-    // 2. ✨ 新增判定：是否点击了 5 联抽商店的某张卡片
-    if (gameMgr->getState() == GameState::Preparation) { // 只有准备阶段允许买牌
-        for (int i = 0; i < 5; i++) {
-            // 重新计算第 i 张卡片的像素范围（与 paintEvent 里的计算完全一致）
-            int cardX = OFFSET_X + i * (SHOP_CARD_W + SHOP_GAP);
-            QRect cardRect(cardX, SHOP_Y, SHOP_CARD_W, SHOP_CARD_H);
-
-            if (cardRect.contains(event->pos())) {
-                // 点击了第 i 张卡片，尝试调用购买
-                bool success = gameMgr->buyHeroFromShop(i);
-                if (success) {
-                    update(); // 购买成功，刷新界面（钱减少、商品变售罄、备战区长出圆圈）
-                }
-                return; // 点了商店就直接返回，不触发下面拖拽/选中的逻辑
-            }
-        }
-    }
-    if(gameMgr->getState()!=GameState::Preparation){return;}//若不是准备状态，禁止抓取
-    auto [lx, ly] = getLogicalPos(event->pos());
-    if(lx != -1) {
-        // 尝试获取单位
-        Unit* clickedUnit = (ly == -1) ? gameMgr->getUnitOnBench(lx) : gameMgr->getUnitOnBoard(lx, ly);
-
-        if(clickedUnit) {
-            // 🔴【核心修复】：如果单位是敌方阵营，或者已经阵亡(HP<=0/Dead状态)，直接拦截，拒绝抓取！
-            if (clickedUnit->owner == Owner::EnemyCtrl || !clickedUnit->isAlive() || clickedUnit->state == UnitState::Dead) {
-                selectedUnit = nullptr;
+        if (i < (int)gameMgr->itemBench.size()) {
+            Item* item = gameMgr->itemBench[i];
+            if (itemPixmaps.count(item->type)) {
+                painter.drawPixmap(rect.adjusted(3, 3, -3, -3), itemPixmaps[item->type]);
             } else {
-                selectedUnit = clickedUnit;
-                focusedUnit = selectedUnit;
-                dragPos = event->pos();
-                update();
+                if (item->type == ItemType::Sword) painter.setBrush(QColor(220, 20, 60));
+                else if (item->type == ItemType::Armor) painter.setBrush(QColor(70, 130, 180));
+                else if (item->type == ItemType::Glove) painter.setBrush(QColor(46, 139, 87));
+                else if (item->type == ItemType::Crystal) painter.setBrush(QColor(30, 144, 255));
+                else painter.setBrush(itemColor(item));
+                painter.setPen(Qt::NoPen);
+                painter.drawRect(rect.adjusted(3, 3, -3, -3));
+            }
+
+            painter.setPen(Qt::white);
+            painter.setFont(QFont("Microsoft YaHei", 8, QFont::Bold));
+            painter.drawText(rect, Qt::AlignCenter, QString::fromStdString(item->name));
+        }
+    }
+}
+
+// 弹道飞行物（箭矢/法球）与受击爆炸特效的动画渲染。
+void MainWindow::drawProjectiles(QPainter& painter) {
+    for (const auto& p : gameMgr->projectiles) {
+        if (p.showHit) {
+            int tpx = OFFSET_X + p.toX * CELL_SIZE + 5;
+            int tpy = OFFSET_Y + p.toY * CELL_SIZE + 5;
+            QPixmap& hitPix = hitEffectPixmap;
+            if (!hitPix.isNull()) {
+                float scale = 1.0f + 0.3f * (float)p.hitTimer / 8.0f;
+                int sz = (int)(40 * scale);
+                painter.drawPixmap(tpx + 25 - sz/2, tpy + 25 - sz/2, sz, sz, hitPix);
+            }
+        } else {
+            float fx = OFFSET_X + (p.fromX + (p.toX - p.fromX) * p.progress) * CELL_SIZE + 30;
+            float fy = OFFSET_Y + (p.fromY + (p.toY - p.fromY) * p.progress) * CELL_SIZE + 30;
+            QPixmap& projPix = p.isSkill ? projectileMagic : projectileArrow;
+            if (!projPix.isNull()) {
+                painter.save();
+                painter.translate(fx, fy);
+                int dx = p.toX - p.fromX;
+                int dy = p.toY - p.fromY;
+                float angle = std::atan2((float)dy, (float)dx) * 180.0f / 3.14159f;
+                painter.rotate(angle);
+                int sz = p.isSkill ? 30 : 24;
+                painter.drawPixmap(-sz/2, -sz/2, sz, sz, projPix);
+                painter.restore();
             }
         }
     }
 }
 
-void MainWindow::mouseMoveEvent(QMouseEvent *event) {
+// 全屏半透明黑色遮罩 + 大号胜负结果文字（VICTORY/DEFEAT/DRAW）。
+void MainWindow::drawBattleResult(QPainter& painter) {
+    if (gameMgr->resultDisplayTimer <= 0) return;
+
+    painter.setBrush(QColor(0, 0, 0, 180));
+    painter.drawRect(0, 0, width(), height());
+    QFont victoryFont("Microsoft YaHei", 36, QFont::Bold);
+    painter.setFont(victoryFont);
+
+    if (gameMgr->battleResultStr == "VICTORY") {
+        painter.setPen(QColor(50, 255, 50));
+        painter.drawText(QRect(0, height()/2 - 140, width(), 60), Qt::AlignCenter, "VICTORY");
+        painter.setPen(QColor(200, 220, 200));
+        painter.setFont(QFont("Microsoft YaHei", 12));
+        painter.drawText(QRect(0, height()/2 - 70, width(), 120), Qt::AlignCenter, gameMgr->settlementBreakdown);
+    } else if (gameMgr->battleResultStr == "DEFEAT") {
+        painter.setPen(QColor(255, 50, 50));
+        painter.drawText(QRect(0, height()/2 - 140, width(), 60), Qt::AlignCenter, "DEFEAT");
+        painter.setPen(QColor(220, 200, 200));
+        painter.setFont(QFont("Microsoft YaHei", 12));
+        painter.drawText(QRect(0, height()/2 - 70, width(), 120), Qt::AlignCenter, gameMgr->settlementBreakdown);
+    } else if (gameMgr->battleResultStr == "DRAW") {
+        painter.setPen(Qt::white);
+        painter.drawText(QRect(0, height()/2 - 140, width(), 60), Qt::AlignCenter, "DRAW");
+        painter.setPen(QColor(200, 200, 200));
+        painter.setFont(QFont("Microsoft YaHei", 12));
+        painter.drawText(QRect(0, height()/2 - 70, width(), 120), Qt::AlignCenter, gameMgr->settlementBreakdown);
+    }
+}
+
+// 底部深色操作提示栏：根据当前游戏阶段显示不同快捷键提示。
+void MainWindow::drawBottomHint(QPainter& painter) {
+    int barY = height() - 22;
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(QColor(40, 42, 48));
+    painter.drawRect(0, barY, width(), 22);
+    painter.setPen(QColor(160, 165, 175));
+    painter.setFont(QFont("Microsoft YaHei", 8));
+    QString hint;
+    if (gameMgr->getState() == GameState::Preparation) {
+        hint = "点击商店购买 | 拖拽布阵/穿戴装备 | 空格开战 | S保存 | L读取 | ESC暂停";
+    } else if (gameMgr->getState() == GameState::Battle) {
+        hint = "战斗自动进行中... | ESC暂停";
+    } else {
+        hint = "结算中...";
+    }
+    painter.drawText(QRect(10, barY, width() - 20, 22), Qt::AlignVCenter | Qt::AlignLeft, hint);
+}
+
+void MainWindow::mousePressEvent(QMouseEvent *event) {
+    // 起手界面和暂停菜单优先处理，避免穿透点击。
     if (inStartMenu) {
+        if (showManual) { handleHelpScreenClick(designPos(event->pos())); }
+        else { handleStartMenuClick(designPos(event->pos())); }
+        return;
+    }
+    if (isPaused) { handlePauseMenuClick(designPos(event->pos())); return; }
+
+    QPoint pos = designPos(event->pos());
+
+    // 按优先级依次检测：装备库存格 → 商店卡片 → 棋盘/备战区单位抓取
+    if (tryStartItemDrag(pos)) return;
+    if (tryShopCardPurchase(pos)) return;
+    tryStartUnitDrag(pos);
+}
+
+// 检测点击位置是否命中装备库存栏的某个格子，命中则抓起该装备开始拖拽。
+bool MainWindow::tryStartItemDrag(const QPoint& pos) {
+    for (int i = 0; i < (int)gameMgr->itemBench.size(); i++) {
+        int x = 20 + i * (ITEM_SIZE + 10);
+        if (QRect(x, ITEM_GRID_Y, ITEM_SIZE, ITEM_SIZE).contains(pos)) {
+            selectedItemIndex = i;
+            isDraggingItem = true;
+            dragPos = pos;
+            update();
+            return true;
+        }
+    }
+    return false;
+}
+
+// 检测点击位置是否在五联抽商店的某张卡片上，命中则尝试购买该英雄。
+bool MainWindow::tryShopCardPurchase(const QPoint& pos) {
+    if (gameMgr->getState() != GameState::Preparation) return false;
+
+    for (int i = 0; i < 5; i++) {
+        int cardX = OFFSET_X + i * (SHOP_CARD_W + SHOP_GAP);
+        if (QRect(cardX, SHOP_Y, SHOP_CARD_W, SHOP_CARD_H).contains(pos)) {
+            if (gameMgr->buyHeroFromShop(i)) update();
+            return true;
+        }
+    }
+    return false;
+}
+
+// 检测点击位置是否在棋盘/备战区的英雄单位上，命中则抓起该单位准备拖拽。
+void MainWindow::tryStartUnitDrag(const QPoint& pos) {
+    if (gameMgr->getState() != GameState::Preparation) return;
+
+    auto [lx, ly] = getLogicalPos(pos);
+    if (lx == -1) return;
+
+    Unit* clickedUnit = (ly == -1) ? gameMgr->getUnitOnBench(lx) : gameMgr->getUnitOnBoard(lx, ly);
+    if (!clickedUnit) return;
+
+    // 敌方单位、已阵亡单位或 Dead 状态的单位不允许抓取
+    if (clickedUnit->owner == Owner::EnemyCtrl || !clickedUnit->isAlive()
+        || clickedUnit->state == UnitState::Dead) {
+        selectedUnit = nullptr;
+        return;
+    }
+
+    selectedUnit = clickedUnit;
+    focusedUnit = selectedUnit;
+    dragPos = pos;
+    update();
+}
+
+void MainWindow::mouseMoveEvent(QMouseEvent *event) {
+    if (inStartMenu || isPaused) {
         return;
     }
 
     if(selectedUnit) {
-        dragPos = event->pos();
+        dragPos = designPos(event->pos());
+
+        auto [lx, ly] = getLogicalPos(designPos(event->pos()));
+        if (lx >= 0) {
+            bool isBench = (ly == -1);
+            dragHoverTarget = QPoint(lx, isBench ? -1 : ly);
+            dragHoverIsBench = isBench;
+            dragHoverValid = gameMgr->canMoveUnit(selectedUnit, lx, isBench ? -1 : ly, isBench);
+        } else {
+            dragHoverTarget = QPoint(-1, -1);
+            dragHoverValid = false;
+        }
+
+        update();
+    }
+    if (isDraggingItem) {
+        dragPos = designPos(event->pos());
         update();
     }
 }
 
 void MainWindow::mouseReleaseEvent(QMouseEvent *event) {
-    if (inStartMenu) {
+    if (inStartMenu || isPaused) return;
+
+    QPoint pos = designPos(event->pos());
+
+    // 装备掉落处理：尝试将手中装备穿戴到落点英雄身上
+    if (isDraggingItem && selectedItemIndex != -1) {
+        handleItemEquip(pos);
         return;
     }
 
-    // 如果松开鼠标时，手里正抓着一件装备
-    if (isDraggingItem && selectedItemIndex != -1) {
-        isDraggingItem = false;
-        Item* draggingItem = gameMgr->itemBench[selectedItemIndex];
+    // 单位放置处理：将拖拽的英雄放置到目标棋盘/备战区位置
+    if (selectedUnit) {
+        handleUnitPlace(pos);
+    }
+}
 
-        Unit* targetHero = nullptr;
+// 装备穿戴逻辑：检测拖拽释放位置是否有可穿戴装备的友方英雄。
+bool MainWindow::handleItemEquip(const QPoint& pos) {
+    isDraggingItem = false;
+    Item* draggingItem = gameMgr->itemBench[selectedItemIndex];
 
-        // 1. 尝试转换为棋盘网格坐标
-        // ✨【核心修复】：调用你的 std::pair 版本的 getLogicalPos
-        std::pair<int, int> logicalPos = getLogicalPos(event->pos());
-        int nx = logicalPos.first;
-        int ny = logicalPos.second;
+    auto [nx, ny] = getLogicalPos(pos);
+    Unit* targetHero = nullptr;
 
-        // 根据你函数返回的特征，直接优雅地捕捉目标英雄
-        if (nx >= 0 && nx < 8) {
-            if (ny >= 0 && ny < 8) {
-                // 情况 1：落点在棋盘内
-                targetHero = gameMgr->getUnitOnBoard(nx, ny);
-            } else if (ny == -1) {
-                // 情况 2：落点在备战区（得益于你自带的 y = -1 逻辑！）
-                targetHero = gameMgr->getUnitOnBench(nx);
-            }
-        }
-
-        // 3. 如果落点处确实是我方英雄，执行穿戴
-        if (targetHero && targetHero->owner == Owner::PlayerCtrl) {
-            if (targetHero->equipItem(draggingItem)) {
-                // 穿戴成功，从装备仓库剔除
-                gameMgr->itemBench.erase(gameMgr->itemBench.begin() + selectedItemIndex);
-                std::cout << "⚔️ " << targetHero->name << " 穿戴了 " << draggingItem->name
-                          << "！当前面板ATK: " << targetHero->atk << " | MaxHP: " << targetHero->maxHp << std::endl;
-            } else {
-                std::cout << "❌ 穿戴失败！该英雄装备槽已满（当前星级限制最多穿戴 "
-                          << targetHero->getMaxItemSlots() << " 件）！" << std::endl;
-            }
-        }
-
-        selectedItemIndex = -1;
-        update();
-        return; // 处理完毕，拦截事件
+    if (nx >= 0 && nx < 8) {
+        if (ny >= 0 && ny < 8) targetHero = gameMgr->getUnitOnBoard(nx, ny);
+        else if (ny == -1)      targetHero = gameMgr->getUnitOnBench(nx);
     }
 
-    if(selectedUnit) {
-        auto [nx, ny] = getLogicalPos(event->pos());
-        if(nx != -1) {
-            // 调用你之前写好的 GameManager 逻辑！
-            gameMgr->MoveUnit(selectedUnit, nx, ny, (ny == -1));
+    if (targetHero && targetHero->owner == Owner::PlayerCtrl) {
+        if (targetHero->equipItem(draggingItem)) {
+            gameMgr->itemBench.erase(gameMgr->itemBench.begin() + selectedItemIndex);
+            std::cout << "⚔️ " << targetHero->name << " 穿戴了 " << draggingItem->name
+                      << "！当前面板ATK: " << targetHero->atk << " | MaxHP: " << targetHero->maxHp << std::endl;
+        } else {
+            std::cout << "❌ 穿戴失败！该英雄装备槽已满（当前星级限制最多穿戴 "
+                      << targetHero->getMaxItemSlots() << " 件）！" << std::endl;
         }
-        selectedUnit = nullptr;
-        update();
     }
+
+    selectedItemIndex = -1;
+    update();
+    return true;
+}
+
+// 单位放置逻辑：将拖拽的英雄移动到有效目标位置，或回退原位。
+void MainWindow::handleUnitPlace(const QPoint& pos) {
+    auto [nx, ny] = getLogicalPos(pos);
+    if (nx != -1) {
+        gameMgr->MoveUnit(selectedUnit, nx, ny, (ny == -1));
+    }
+
+    selectedUnit = nullptr;
+    dragHoverTarget = QPoint(-1, -1);
+    dragHoverIsBench = false;
+    dragHoverValid = false;
+    update();
 }
 
 void MainWindow::onGameTick(){
-    if (!inStartMenu) {
-        gameMgr->updateTick();//驱动后台逻辑
+    if (!inStartMenu && !isPaused) {
+        gameMgr->updateTick();
     }
-    update();//强制界面重绘
+    m_rightPanel->setVisible(!inStartMenu);
+    m_rightPanel->Refresh();
+    if (focusedUnit) {
+        m_rightPanel->SetFocusedUnit(focusedUnit, getHeroSkillDesc(focusedUnit->name));
+    }
+    update();
 }
 void MainWindow::keyPressEvent(QKeyEvent*event){
+    // 起手界面和游戏中键盘操作互不干扰，分别由独立函数处理。
     if (inStartMenu) {
-        if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
-            inStartMenu = false;
+        handleStartMenuKeys(event);
+        return;
+    }
+    handleInGameKeys(event);
+}
+
+// 起手界面键盘操作：ESC 关闭帮助，回车开始新游戏。
+void MainWindow::handleStartMenuKeys(QKeyEvent* event) {
+    if (showManual) {
+        if (event->key() == Qt::Key_Escape) {
+            showManual = false;
+            manualScrollOffset = 0;
             update();
         }
         return;
     }
+    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+        inStartMenu = false;
+        update();
+    }
+}
 
-    if(event->key()==Qt::Key_Space){
-        //按键为空格，则开始战斗
+// 游戏中键盘操作：ESC 切暂停/继续，空格开战，S 快速保存，L 快速读取。
+void MainWindow::handleInGameKeys(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Escape) {
+        isPaused = !isPaused;
+        update();
+        return;
+    }
+
+    if (isPaused) return;
+
+    if (event->key() == Qt::Key_Space) {
         gameMgr->startBattle();
         update();
     } else if (event->key() == Qt::Key_S) {
-        // S 快捷键保存当前局面。
         gameMgr->saveGame(createTimestampSavePath());
         refreshSaveList();
         update();
     } else if (event->key() == Qt::Key_L) {
-        // L 快捷键读取最近一次历史存档。
         refreshSaveList();
         if (!saveFiles.empty()) {
             gameMgr->loadGame(saveFiles.first());
@@ -1149,4 +1078,37 @@ void MainWindow::keyPressEvent(QKeyEvent*event){
         }
         update();
     }
+}
+
+void MainWindow::onPauseRequested() {
+    isPaused = true;
+    setFocus();
+    update();
+}
+
+void MainWindow::onRefreshShopRequested() {
+    if (gameMgr->getState() == GameState::Preparation) {
+        gameMgr->refreshShopManual();
+        setFocus();
+        update();
+    }
+}
+
+void MainWindow::onBuyXPRequested() {
+    if (gameMgr->getState() == GameState::Preparation) {
+        gameMgr->buyXP();
+        setFocus();
+        update();
+    }
+}
+
+void MainWindow::wheelEvent(QWheelEvent* event) {
+    if (showManual) {
+        manualScrollOffset -= event->angleDelta().y() / 8;
+        if (manualScrollOffset > 0) manualScrollOffset = 0;
+        update();
+        event->accept();
+        return;
+    }
+    QMainWindow::wheelEvent(event);
 }

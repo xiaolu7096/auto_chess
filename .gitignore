@@ -3,12 +3,32 @@
 *.user.*
 .qtcreator/
 
+# 忽略 VS Code 配置
+.vscode/
+
 # 忽略所有编译输出文件夹
 build/
 Build/
-*build*/
+
+# 忽略源代码目录中的 CMake 构建残留
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+auto_chess1_0_autogen/
+.qmake.stash
+qtcsettings.cmake
+
+# 忽略 Qt 部署辅助文件
+.qt/
+
+# 忽略 Clangd 索引缓存
+.qtc_clangd/
 
 # 忽略临时文件与可执行程序
 *.o
 *.obj
 *.exe
+
+# 忽略运行时保存的棋局数据
+saves/

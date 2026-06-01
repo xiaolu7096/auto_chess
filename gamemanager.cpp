@@ -1,4 +1,5 @@
 #include "gamemanager.h"
+#include "advanceditems.h"
 #include "heroes.h"
 
 #include <algorithm>
@@ -12,12 +13,7 @@
 #include <QJsonObject>
 
 GameManager::GameManager() {
-    // 初始化棋盘、备战区和商店槽位，所有指针先置空。
-    for (int i = 0; i < LENGTH; i++) {
-        for (int j = 0; j < WIDTH; j++) {
-            board[i][j] = nullptr;
-        }
-    }
+    board.clear();
     for (int i = 0; i < BENCHSIZE; i++) {
         bench[i] = nullptr;
     }
@@ -28,19 +24,14 @@ GameManager::GameManager() {
     player = new Player();
     currentState = GameState::Preparation;
     currentround = 1;
+    winStreak = 0;
+    loseStreak = 0;
+    interestGold = 0;
     refreshShop();
 }
 
 GameManager::~GameManager() {
-    // GameManager 拥有棋盘、备战区、商店和装备栏中的动态对象，退出时统一释放。
-    for (int i = 0; i < LENGTH; i++) {
-        for (int j = 0; j < WIDTH; j++) {
-            delete board[i][j];
-        }
-    }
-    for (int i = 0; i < BENCHSIZE; i++) {
-        delete bench[i];
-    }
+    clearAllUnits();
     for (int i = 0; i < 5; i++) {
         delete shopSlots[i];
     }
@@ -50,35 +41,72 @@ GameManager::~GameManager() {
     delete player;
 }
 
+void GameManager::registerUnit(Unit* u) {
+    if (!u) return;
+    allUnits.push_back(u);
+}
+
+void GameManager::unregisterUnit(Unit* u) {
+    if (!u) return;
+    auto it = std::find(allUnits.begin(), allUnits.end(), u);
+    if (it != allUnits.end()) {
+        allUnits.erase(it);
+    }
+}
+
+void GameManager::clearAllUnits() {
+    for (Unit* u : allUnits) {
+        delete u;
+    }
+    allUnits.clear();
+}
+
 void GameManager::updateUnitPosition(int oldX, int oldY, int newX, int newY) {
-    // 战斗中移动单位时，同步棋盘数组里的指针。
-    if (oldX < 0 || oldX >= LENGTH || oldY < 0 || oldY >= WIDTH) return;
-    if (newX < 0 || newX >= LENGTH || newY < 0 || newY >= WIDTH) return;
-    board[newX][newY] = board[oldX][oldY];
-    board[oldX][oldY] = nullptr;
+    if (!board.isValidPosition(oldX, oldY)) return;
+    if (!board.isValidPosition(newX, newY)) return;
+    Unit* u = board.getUnitAt(oldX, oldY);
+    board.addUnit(newX, newY, u);
+    board.removeUnit(oldX, oldY);
+}
+
+bool GameManager::canMoveUnit(Unit* target, int nextX, int nextY, bool toBench) {
+    if (!target) return false;
+    if (nextX < 0 || nextX >= BENCHSIZE) return false;
+    if (!toBench && (nextY < 0 || nextY >= BOARD_ROWS)) return false;
+
+    // 玩家单位不可拖拽到敌方半场（0-3 行），准备阶段排兵布阵仅在己方半场（4-7 行）进行。
+    if (!toBench && target->owner == Owner::PlayerCtrl && nextY < 4) {
+        return false;
+    }
+
+    bool oldIsBench = target->isBench;
+    Unit* existingUnit = toBench ? bench[nextX] : board.getUnitAt(nextX, nextY);
+
+    if (existingUnit == nullptr) {
+        if (!toBench && oldIsBench && !Checkpopulation()) {
+            return false;
+        }
+        return true;
+    }
+    if (existingUnit->owner == target->owner) {
+        return true;
+    }
+    return false;
 }
 
 bool GameManager::MoveUnit(Unit* target, int nextX, int nextY, bool toBench) {
-    // 准备阶段拖拽单位：支持棋盘/备战区移动、同阵营交换、人口限制。
-    if (!target) return false;
-    if (nextX < 0 || nextX >= BENCHSIZE) return false;
-    if (!toBench && (nextY < 0 || nextY >= WIDTH)) return false;
+    if (!canMoveUnit(target, nextX, nextY, toBench)) return false;
 
     int oldX = target->x;
     int oldY = target->y;
     bool oldIsBench = target->isBench;
-    Unit* existingUnit = toBench ? bench[nextX] : board[nextX][nextY];
+    Unit* existingUnit = toBench ? bench[nextX] : board.getUnitAt(nextX, nextY);
 
     if (existingUnit == nullptr) {
-        if (!toBench && oldIsBench && !Checkpopulation()) {
-            std::cout << "Population is full, cannot deploy more units." << std::endl;
-            return false;
-        }
-
         if (oldIsBench) {
             bench[oldX] = nullptr;
         } else {
-            board[oldX][oldY] = nullptr;
+            board.removeUnit(oldX, oldY);
         }
 
         if (toBench) {
@@ -87,25 +115,29 @@ bool GameManager::MoveUnit(Unit* target, int nextX, int nextY, bool toBench) {
             target->y = -1;
             target->isBench = true;
         } else {
-            board[nextX][nextY] = target;
+            board.addUnit(nextX, nextY, target);
             target->x = nextX;
             target->y = nextY;
             target->isBench = false;
         }
-    } else if (existingUnit->owner == target->owner) {
-        Unit*& srcSlot = oldIsBench ? bench[oldX] : board[oldX][oldY];
-        Unit*& dstSlot = toBench ? bench[nextX] : board[nextX][nextY];
-        std::swap(srcSlot, dstSlot);
-
-        target->x = nextX;
-        target->y = toBench ? -1 : nextY;
-        target->isBench = toBench;
-
+    } else {
+        if (oldIsBench) {
+            bench[oldX] = existingUnit;
+        } else {
+            board.addUnit(oldX, oldY, existingUnit);
+        }
         existingUnit->x = oldX;
         existingUnit->y = oldIsBench ? -1 : oldY;
         existingUnit->isBench = oldIsBench;
-    } else {
-        return false;
+
+        if (toBench) {
+            bench[nextX] = target;
+        } else {
+            board.addUnit(nextX, nextY, target);
+        }
+        target->x = nextX;
+        target->y = toBench ? -1 : nextY;
+        target->isBench = toBench;
     }
 
     updateActiveTraits();
@@ -113,52 +145,45 @@ bool GameManager::MoveUnit(Unit* target, int nextX, int nextY, bool toBench) {
 }
 
 Unit* GameManager::getUnitOnBench(int index) {
-    // 获取备战区指定格子的单位。
     if (index < 0 || index >= BENCHSIZE) return nullptr;
     return bench[index];
 }
 
 Unit* GameManager::getUnitOnBoard(int x, int y) {
-    // 获取棋盘指定格子的单位。
-    if (x < 0 || x >= LENGTH || y < 0 || y >= WIDTH) return nullptr;
-    return board[x][y];
+    return board.getUnitAt(x, y);
 }
 
 bool GameManager::Checkpopulation() {
-    // 判断当前上阵人数是否低于人口上限。
     int deployed = 0;
-    for (int i = 0; i < LENGTH; i++) {
-        for (int j = 0; j < WIDTH; j++) {
-            if (board[i][j] && board[i][j]->owner == Owner::PlayerCtrl) {
-                deployed++;
-            }
+    for (Unit* u : allUnits) {
+        if (u && !u->isBench && u->owner == Owner::PlayerCtrl) {
+            deployed++;
         }
     }
     return deployed < player->getPopulationCap();
 }
 
 void GameManager::RemoveUnit(Unit* targetUnit) {
-    // 从棋盘或备战区移除一个单位，并释放内存。
     if (!targetUnit) return;
     if (targetUnit->isBench) {
         bench[targetUnit->x] = nullptr;
     } else {
-        board[targetUnit->x][targetUnit->y] = nullptr;
+        board.removeUnit(targetUnit->x, targetUnit->y);
     }
+    unregisterUnit(targetUnit);
     delete targetUnit;
     updateActiveTraits();
 }
 
 void GameManager::spawnEnemyRound(int round) {
-    // 每回合按轮数生成更强的敌人，数量最多 6 个，避免棋盘过满。
     int enemyCount = std::min(2 + round / 2, 6);
     int bonusHp = (round - 1) * 35;
     int bonusAtk = (round - 1) * 5;
 
     for (int i = 0; i < enemyCount; i++) {
-        int x = i % LENGTH;
-        int y = i / LENGTH;
-        if (y >= 2 || board[x][y] != nullptr) {
+        int x = i % BOARD_COLS;
+        int y = i / BOARD_COLS;
+        if (y >= 2 || board.getUnitAt(x, y) != nullptr) {
             continue;
         }
 
@@ -179,55 +204,75 @@ void GameManager::spawnEnemyRound(int round) {
         enemy->x = x;
         enemy->y = y;
         enemy->isBench = false;
-        board[x][y] = enemy;
+        board.addUnit(x, y, enemy);
+        registerUnit(enemy);
     }
 }
 
 void GameManager::startBattle() {
-    // 从准备阶段切入战斗：清理旧敌人、应用羁绊、生成本轮敌人。
     if (currentState != GameState::Preparation) return;
+
+projectiles.clear();
+    skillEffects.clear();
 
     updateActiveTraits();
     int mageCount = activeTraitsCount["Mage"];
     int vanguardCount = activeTraitsCount["Vanguard"];
+    int knightCount = activeTraitsCount["Knight"];
+    int healerCount = activeTraitsCount["Healer"];
 
-    for (int i = 0; i < LENGTH; i++) {
-        for (int j = 0; j < WIDTH; j++) {
-            Unit* u = board[i][j];
-            if (!u || u->owner != Owner::PlayerCtrl) continue;
+    for (Unit* u : allUnits) {
+        if (!u || u->owner != Owner::PlayerCtrl || u->isBench) continue;
+        u->state = UnitState::Idle;
+        u->target = nullptr;
+        u->mana = 0;
 
-            u->state = UnitState::Idle;
-            u->target = nullptr;
-            u->mana = 0;
+        if (mageCount >= 2 &&
+            std::find(u->traits.begin(), u->traits.end(), "Mage") != u->traits.end()) {
+            u->maxMana = std::max(10, u->maxMana - 20);
+        }
 
-            if (mageCount >= 2 &&
-                std::find(u->traits.begin(), u->traits.end(), "Mage") != u->traits.end()) {
-                u->maxMana = std::max(10, u->maxMana - 20);
-            }
+        if (vanguardCount >= 1 &&
+            std::find(u->traits.begin(), u->traits.end(), "Vanguard") != u->traits.end()) {
+            u->maxHp += 120;
+            u->hp = u->maxHp;
+        }
 
-            if (vanguardCount >= 1 &&
-                std::find(u->traits.begin(), u->traits.end(), "Vanguard") != u->traits.end()) {
-                u->maxHp += 120;
-                u->hp = u->maxHp;
-            }
+        if (knightCount >= 2 &&
+            std::find(u->traits.begin(), u->traits.end(), "Knight") != u->traits.end()) {
+            u->maxHp += 100;
+            u->hp = u->maxHp;
+            u->atk += 15;
+        }
+
+        if (healerCount >= 2) {
+            u->maxHp += 80;
+            u->hp = u->maxHp;
+            u->atk += 5;
         }
     }
 
-    for (int i = 0; i < LENGTH; i++) {
-        for (int j = 0; j < 2; j++) {
-            if (board[i][j] && board[i][j]->owner == Owner::EnemyCtrl) {
-                delete board[i][j];
-                board[i][j] = nullptr;
+    for (int x = 0; x < BOARD_COLS; x++) {
+        for (int y = 0; y < 2; y++) {
+            Unit* u = board.getUnitAt(x, y);
+            if (u && u->owner == Owner::EnemyCtrl) {
+                board.removeUnit(x, y);
+                unregisterUnit(u);
+                delete u;
             }
         }
     }
 
     spawnEnemyRound(currentround);
+
+    // 触发高级装备的 BattleStart 被动（如大天使之杖初始法力）
+    triggerItemCallbacks_BattleStart();
+
     currentState = GameState::Battle;
+    battleFrame = 0;
 }
 
 void GameManager::updateTick() {
-    // 主时钟入口：战斗中驱动单位；结算展示结束后自动回到准备阶段。
     if (resultDisplayTimer > 0) {
         resultDisplayTimer--;
         if (resultDisplayTimer == 0 && currentState == GameState::Settlement) {
@@ -236,35 +281,82 @@ void GameManager::updateTick() {
         }
     }
 
-    if (currentState != GameState::Battle) return;
+    if (currentState != GameState::Battle) {
+        if (!projectiles.empty()) {
+            projectiles.clear();
+        }
+        if (!skillEffects.empty()) {
+            skillEffects.clear();
+        }
+        return;
+    }
 
-    for (int i = 0; i < LENGTH; i++) {
-        for (int j = 0; j < WIDTH; j++) {
-            if (board[i][j]) {
-                board[i][j]->updateAction(this);
-            }
+    for (Unit* u : allUnits) {
+        if (u && !u->isBench) {
+            u->updateAction(this);
         }
     }
+
+    battleFrame++;
+    triggerItemCallbacks_Tick();
+
+    updateProjectiles();
+
+    for (auto& e : skillEffects) { e.timer--; }
+    skillEffects.erase(
+        std::remove_if(skillEffects.begin(), skillEffects.end(),
+            [](const SkillEffect& e) { return e.timer <= 0; }),
+        skillEffects.end());
 
     cleanupDeadUnits();
     checkBattleResult();
 }
 
+void GameManager::addProjectile(int fromX, int fromY, int toX, int toY, bool isSkill) {
+    Projectile p;
+    p.fromX = fromX;
+    p.fromY = fromY;
+    p.toX = toX;
+    p.toY = toY;
+    p.isSkill = isSkill;
+    p.totalFrames = isSkill ? 16 : 10;
+    projectiles.push_back(p);
+}
+
+void GameManager::addSkillEffect(int x, int y, const std::string& skillName, int duration) {
+    skillEffects.push_back({x, y, skillName, duration});
+}
+
+void GameManager::updateProjectiles() {
+    for (auto& p : projectiles) {
+        if (p.showHit) {
+            p.hitTimer--;
+            continue;
+        }
+        p.currentFrame++;
+        p.progress = (float)p.currentFrame / p.totalFrames;
+        if (p.currentFrame >= p.totalFrames) {
+            p.showHit = true;
+            p.hitTimer = 8;
+        }
+    }
+    projectiles.erase(
+        std::remove_if(projectiles.begin(), projectiles.end(),
+            [](const Projectile& p) { return p.showHit && p.hitTimer <= 0; }),
+        projectiles.end());
+}
+
 void GameManager::checkBattleResult() {
-    // 扫描双方是否还有存活单位，若一方清空则进入结算阶段。
     if (currentState != GameState::Battle) return;
 
     bool playerAlive = false;
     bool enemyAlive = false;
-    for (int i = 0; i < LENGTH; i++) {
-        for (int j = 0; j < WIDTH; j++) {
-            Unit* u = board[i][j];
-            if (!u || !u->isAlive()) continue;
-            if (u->owner == Owner::PlayerCtrl) {
-                playerAlive = true;
-            } else {
-                enemyAlive = true;
-            }
+    for (Unit* u : allUnits) {
+        if (!u || u->isBench || !u->isAlive()) continue;
+        if (u->owner == Owner::PlayerCtrl) {
+            playerAlive = true;
+        } else {
+            enemyAlive = true;
         }
     }
 
@@ -272,88 +364,185 @@ void GameManager::checkBattleResult() {
 
     currentState = GameState::Settlement;
     resultDisplayTimer = 60;
+    settlementBreakdown.clear();
+
+    int baseGold = 0;
+    int streakBonus = 0;
 
     if (!playerAlive && !enemyAlive) {
         battleResultStr = "DRAW";
-        player->addGold(2);
+        baseGold = 2;
+        player->addGold(baseGold);
         currentround++;
+        winStreak = 0;
+        loseStreak = 0;
     } else if (playerAlive) {
         battleResultStr = "VICTORY";
-        player->addGold(6);
+        baseGold = 6;
+        player->addGold(baseGold);
         currentround++;
+        winStreak++;
+        loseStreak = 0;
     } else {
         battleResultStr = "DEFEAT";
+        baseGold = 5;
         playerHp = std::max(0, playerHp - 10);
-        player->addGold(5);
+        player->addGold(baseGold);
+        loseStreak++;
+        winStreak = 0;
     }
 
-    for (int i = 0; i < LENGTH; i++) {
-        for (int j = 0; j < WIDTH; j++) {
-            Unit* u = board[i][j];
-            if (!u) continue;
-            if (u->owner == Owner::EnemyCtrl) {
-                delete u;
-                board[i][j] = nullptr;
-                continue;
+    // ==================== 阶段四：高级经济系统 ====================
+    // 利息：每 10 金币额外获得 1 金币，最多 5 金币。
+    int interest = std::min(5, player->getGold() / 10);
+    interestGold = interest;
+    player->addGold(interest);
+
+    // 连胜连败奖励：3 连击起每轮额外 1 金币。
+    if (winStreak >= 3) {
+        int bonus = std::min(winStreak - 2, 5);
+        streakBonus = bonus;
+        player->addGold(bonus);
+    }
+    if (loseStreak >= 3) {
+        int bonus = std::min(loseStreak - 2, 5);
+        streakBonus = bonus;
+        player->addGold(bonus);
+    }
+
+    // 组装结算明细
+    settlementBreakdown = QString("基础奖励: +%1G\n利息: +%2G").arg(baseGold).arg(interest);
+    if (streakBonus > 0) {
+        settlementBreakdown += QString("\n%1%2奖励: +%3G")
+            .arg(winStreak >= 3 ? "连胜" : "连败")
+            .arg(std::max(winStreak, loseStreak))
+            .arg(streakBonus);
+    }
+    settlementBreakdown += "\n经验: +1XP";
+
+    std::vector<Unit*> toDelete;
+    for (Unit* u : allUnits) {
+        if (!u || u->isBench) continue;
+        if (u->owner == Owner::EnemyCtrl) {
+            board.removeUnit(u->x, u->y);
+            toDelete.push_back(u);
+        } else if (u->owner == Owner::PlayerCtrl && u->isAlive()) {
+            u->maxHp = u->baseMaxHp;
+            u->atk = u->baseAtk;
+            u->maxMana = u->baseMaxMana;
+            for (Item* item : u->equippedItems) {
+                u->atk += item->bonusAtk;
+                u->maxHp += item->bonusHp;
+                if (u->maxMana > item->manaReduction) {
+                    u->maxMana -= item->manaReduction;
+                } else {
+                    u->maxMana = 10;
+                }
             }
-            if (u->owner == Owner::PlayerCtrl && u->isAlive()) {
-                u->hp = u->maxHp;
-                u->mana = 0;
-                u->state = UnitState::Idle;
-                u->target = nullptr;
+            u->hp = u->maxHp;
+            u->mana = 0;
+            u->state = UnitState::Idle;
+            u->target = nullptr;
+        }
+    }
+
+    for (Unit* u : toDelete) {
+        unregisterUnit(u);
+        delete u;
+    }
+
+    // 战斗结束后，存活玩家单位自动归位到己方半场（4-7 行），从左到右、从上到下排列。
+    std::vector<Unit*> surviving;
+    for (Unit* u : allUnits) {
+        if (!u || u->isBench || u->owner != Owner::PlayerCtrl || !u->isAlive()) continue;
+        surviving.push_back(u);
+        board.removeUnit(u->x, u->y);
+    }
+    int slotIdx = 0;
+    for (int y = 4; y < BOARD_ROWS && slotIdx < (int)surviving.size(); y++) {
+        for (int x = 0; x < BOARD_COLS && slotIdx < (int)surviving.size(); x++) {
+            if (board.getUnitAt(x, y) == nullptr) {
+                Unit* u = surviving[slotIdx++];
+                board.addUnit(x, y, u);
+                u->x = x;
+                u->y = y;
+                u->isBench = false;
             }
         }
     }
+
+    projectiles.clear();
 
     player->addXP(1);
     updateActiveTraits();
 }
 
 void GameManager::cleanupDeadUnits() {
-    // 清理战斗中阵亡的单位；敌人死亡时有概率掉落基础装备。
     if (currentState != GameState::Battle) return;
 
-    for (int i = 0; i < LENGTH; i++) {
-        for (int j = 0; j < WIDTH; j++) {
-            Unit* u = board[i][j];
-            if (!u || (u->isAlive() && u->state != UnitState::Dead)) {
-                continue;
-            }
-
-            if (u->owner == Owner::EnemyCtrl && (rand() % 100) < 30) {
-                Item* droppedItem = new Item(static_cast<ItemType>(rand() % 4));
-                if ((int)itemBench.size() < MAX_ITEM_BENCH) {
-                    itemBench.push_back(droppedItem);
-                } else {
-                    delete droppedItem;
-                }
-            }
-
-            delete u;
-            board[i][j] = nullptr;
+    std::vector<Unit*> toDelete;
+    for (Unit* u : allUnits) {
+        if (!u || u->isBench || (u->isAlive() && u->state != UnitState::Dead)) {
+            continue;
         }
+
+        // 检查高级装备复活钩子（如复活甲）
+        if (triggerItemCallbacks_Death(u)) {
+            u->hp = u->maxHp;
+            u->state = UnitState::Idle;
+            u->target = nullptr;
+            continue;  // 复活成功，跳过删除
+        }
+
+        if (u->owner == Owner::EnemyCtrl && (rand() % 100) < 30) {
+            Item* droppedItem = new Item(static_cast<ItemType>(rand() % 4));
+            if ((int)itemBench.size() < MAX_ITEM_BENCH) {
+                itemBench.push_back(droppedItem);
+            } else {
+                delete droppedItem;
+            }
+        }
+
+        board.removeUnit(u->x, u->y);
+        toDelete.push_back(u);
+    }
+
+    for (Unit* u : toDelete) {
+        // 清除其他单位持有的悬垂 target 指针，防止下一帧 use-after-free 崩溃。
+        for (Unit* other : allUnits) {
+            if (other && other->target == u) {
+                other->target = nullptr;
+                other->state = UnitState::Idle;
+            }
+        }
+        unregisterUnit(u);
+        delete u;
     }
 }
 
 void GameManager::refreshShop() {
-    // 刷新 5 个商店格子，随机放入当前可购买的英雄。
     for (int i = 0; i < 5; i++) {
         delete shopSlots[i];
         shopSlots[i] = nullptr;
 
-        int control = rand() % 3;
+        int control = rand() % 6;
         if (control == 0) {
             shopSlots[i] = new Garen(Owner::PlayerCtrl);
         } else if (control == 1) {
             shopSlots[i] = new Ryze(Owner::PlayerCtrl);
-        } else {
+        } else if (control == 2) {
             shopSlots[i] = new Soraka(Owner::PlayerCtrl);
+        } else if (control == 3) {
+            shopSlots[i] = new Leona(Owner::PlayerCtrl);
+        } else if (control == 4) {
+            shopSlots[i] = new Ashe(Owner::PlayerCtrl);
+        } else {
+            shopSlots[i] = new Jhin(Owner::PlayerCtrl);
         }
     }
 }
 
 void GameManager::buyXP() {
-    // 花费金币购买经验，提升等级后人口上限随之提高。
     if (currentState != GameState::Preparation) return;
     if (player->spendGold(4)) {
         player->addXP(4);
@@ -361,12 +550,10 @@ void GameManager::buyXP() {
 }
 
 int GameManager::getpoplulation() {
-    // 返回当前人口上限，用于 UI 展示。
     return player->getPopulationCap();
 }
 
 void GameManager::refreshShopManual() {
-    // 玩家手动刷新商店，准备阶段花费 2 金币。
     if (currentState != GameState::Preparation) return;
     if (player->spendGold(2)) {
         refreshShop();
@@ -374,7 +561,6 @@ void GameManager::refreshShopManual() {
 }
 
 bool GameManager::buyHeroFromShop(int shopIndex) {
-    // 从商店购买英雄，成功后放入第一个空备战格。
     if (shopIndex < 0 || shopIndex >= 5) return false;
     Unit* hero = shopSlots[shopIndex];
     if (!hero) return false;
@@ -395,32 +581,24 @@ bool GameManager::buyHeroFromShop(int shopIndex) {
     hero->isBench = true;
     shopSlots[shopIndex] = nullptr;
 
+    registerUnit(hero);
+
     checkAndCombineStars();
     updateActiveTraits();
     return true;
 }
 
 void GameManager::checkAndCombineStars() {
-    // 三个同名同星级英雄自动合成一个高一星英雄，保留第一个找到的单位。
-    std::vector<std::string> heroNames = {"Garen", "Ryze", "Soraka"};
+    std::vector<std::string> heroNames = {"Garen", "Ryze", "Soraka", "Leona", "Ashe", "Jhin"};
 
     for (const std::string& name : heroNames) {
         for (int s = 1; s <= 2; s++) {
             std::vector<Unit*> matches;
 
-            for (int i = 0; i < BENCHSIZE; i++) {
-                if (bench[i] && bench[i]->owner == Owner::PlayerCtrl &&
-                    bench[i]->name == name && bench[i]->star == s) {
-                    matches.push_back(bench[i]);
-                }
-            }
-
-            for (int i = 0; i < LENGTH; i++) {
-                for (int j = 0; j < WIDTH; j++) {
-                    if (board[i][j] && board[i][j]->owner == Owner::PlayerCtrl &&
-                        board[i][j]->name == name && board[i][j]->star == s) {
-                        matches.push_back(board[i][j]);
-                    }
+            for (Unit* u : allUnits) {
+                if (u && u->owner == Owner::PlayerCtrl &&
+                    u->name == name && u->star == s) {
+                    matches.push_back(u);
                 }
             }
 
@@ -434,8 +612,9 @@ void GameManager::checkAndCombineStars() {
                     if (target->isBench) {
                         bench[target->x] = nullptr;
                     } else {
-                        board[target->x][target->y] = nullptr;
+                        board.removeUnit(target->x, target->y);
                     }
+                    unregisterUnit(target);
                     delete target;
                 };
 
@@ -449,17 +628,13 @@ void GameManager::checkAndCombineStars() {
 }
 
 void GameManager::updateActiveTraits() {
-    // 统计当前棋盘上玩家单位的羁绊数量，供 UI 和开战 buff 使用。
     activeTraitsCount.clear();
     std::map<std::string, std::set<Unit*>> traitToHeroUnits;
 
-    for (int i = 0; i < LENGTH; i++) {
-        for (int j = 0; j < WIDTH; j++) {
-            Unit* u = board[i][j];
-            if (!u || !u->isAlive() || u->owner != Owner::PlayerCtrl) continue;
-            for (const std::string& trait : u->traits) {
-                traitToHeroUnits[trait].insert(u);
-            }
+    for (Unit* u : allUnits) {
+        if (!u || !u->isAlive() || u->owner != Owner::PlayerCtrl || u->isBench) continue;
+        for (const std::string& trait : u->traits) {
+            traitToHeroUnits[trait].insert(u);
         }
     }
 
@@ -469,10 +644,12 @@ void GameManager::updateActiveTraits() {
 }
 
 Unit* GameManager::createUnitByName(const std::string& name, Owner owner) {
-    // 读档辅助：根据存档中的英雄名重新创建正确的子类对象。
     if (name == "Garen") return new Garen(owner);
     if (name == "Ryze") return new Ryze(owner);
     if (name == "Soraka") return new Soraka(owner);
+    if (name == "Leona") return new Leona(owner);
+    if (name == "Ashe") return new Ashe(owner);
+    if (name == "Jhin") return new Jhin(owner);
 
     Unit* enemy = new Unit(120, 18, 1, 0, owner);
     enemy->name = name.empty() ? "Enemy" : name;
@@ -483,58 +660,62 @@ Unit* GameManager::createUnitByName(const std::string& name, Owner owner) {
 }
 
 Item* GameManager::createItemByName(const std::string& name) {
-    // 读档辅助：根据装备名恢复装备对象；兼容中英文/乱码名时优先按存档类型字段保存。
     if (name == "Sword") return new Item(ItemType::Sword);
     if (name == "Armor") return new Item(ItemType::Armor);
     if (name == "Glove") return new Item(ItemType::Glove);
     if (name == "Crystal") return new Item(ItemType::Crystal);
+    // 高级合成装备
+    if (name == "ReviveArmor") return new ReviveArmor();
+    if (name == "InfinityEdge") return new InfinityEdge();
+    if (name == "ArchangelStaff") return new ArchangelStaff();
+    if (name == "ThornmailArmor") return new ThornmailArmor();
+    if (name == "WarmogArmor") return new WarmogArmor();
+    if (name == "LudenEcho") return new LudenEcho();
     return new Item(ItemType::Sword);
 }
 
 static QString ownerToString(Owner owner) {
-    // 把阵营枚举转成 JSON 中可读的字符串。
     return owner == Owner::PlayerCtrl ? "Player" : "Enemy";
 }
 
 static Owner ownerFromString(const QString& owner) {
-    // 把 JSON 字符串还原成阵营枚举。
     return owner == "Enemy" ? Owner::EnemyCtrl : Owner::PlayerCtrl;
 }
 
 static QString stateToString(GameState state) {
-    // 把主阶段转成 JSON 字符串。
     if (state == GameState::Battle) return "Battle";
     if (state == GameState::Settlement) return "Settlement";
     return "Preparation";
 }
 
 static GameState stateFromString(const QString& state) {
-    // 把 JSON 字符串还原成主阶段。
     if (state == "Battle") return GameState::Battle;
     if (state == "Settlement") return GameState::Settlement;
     return GameState::Preparation;
 }
 
 static QString itemTypeToString(ItemType type) {
-    // 把装备类型转成稳定英文，避免中文显示编码影响读档。
     switch (type) {
     case ItemType::Sword: return "Sword";
     case ItemType::Armor: return "Armor";
     case ItemType::Glove: return "Glove";
     case ItemType::Crystal: return "Crystal";
+    case ItemType::Advanced: return "Advanced";
     }
     return "Sword";
 }
 
 static QJsonObject itemToJson(Item* item) {
-    // 把单件装备写成 JSON 对象。
     QJsonObject obj;
     obj["type"] = itemTypeToString(item->type);
+    // 高级装备额外保存名称，用于读档时重建正确的子类
+    if (item->type == ItemType::Advanced) {
+        obj["name"] = QString::fromStdString(item->name);
+    }
     return obj;
 }
 
 static QJsonObject unitToJson(Unit* unit, int slotX, int slotY, const QString& area) {
-    // 把一个单位的核心状态、位置、羁绊和已穿装备写入 JSON。
     QJsonObject obj;
     obj["area"] = area;
     obj["x"] = slotX;
@@ -565,7 +746,6 @@ static QJsonObject unitToJson(Unit* unit, int slotX, int slotY, const QString& a
 }
 
 bool GameManager::saveGame(const QString& filePath) {
-    // 保存完整游戏状态：玩家资源、回合、阶段、棋盘、备战区、装备库存和商店。
     QJsonObject root;
     root["version"] = 1;
     root["state"] = stateToString(currentState);
@@ -573,6 +753,8 @@ bool GameManager::saveGame(const QString& filePath) {
     root["playerHp"] = playerHp;
     root["enemyHp"] = enemyHp;
     root["battleResult"] = battleResultStr;
+    root["winStreak"] = winStreak;
+    root["loseStreak"] = loseStreak;
 
     QJsonObject playerObj;
     playerObj["hp"] = player->getHp();
@@ -583,10 +765,11 @@ bool GameManager::saveGame(const QString& filePath) {
     root["player"] = playerObj;
 
     QJsonArray units;
-    for (int i = 0; i < LENGTH; i++) {
-        for (int j = 0; j < WIDTH; j++) {
-            if (board[i][j]) {
-                units.append(unitToJson(board[i][j], i, j, "board"));
+    for (int x = 0; x < BOARD_COLS; x++) {
+        for (int y = 0; y < BOARD_ROWS; y++) {
+            Unit* u = board.getUnitAt(x, y);
+            if (u) {
+                units.append(unitToJson(u, x, y, "board"));
             }
         }
     }
@@ -627,7 +810,6 @@ bool GameManager::saveGame(const QString& filePath) {
 }
 
 bool GameManager::loadGame(const QString& filePath) {
-    // 从 JSON 存档恢复游戏；先清空当前对象，再按存档内容重建。
     std::ifstream file(filePath.toStdString(), std::ios::binary);
     if (!file.is_open()) {
         return false;
@@ -642,18 +824,12 @@ bool GameManager::loadGame(const QString& filePath) {
 
     QJsonObject root = doc.object();
 
-    for (int i = 0; i < LENGTH; i++) {
-        for (int j = 0; j < WIDTH; j++) {
-            delete board[i][j];
-            board[i][j] = nullptr;
-        }
-    }
+    clearAllUnits();
+    board.clear();
     for (int i = 0; i < BENCHSIZE; i++) {
-        delete bench[i];
         bench[i] = nullptr;
     }
     for (int i = 0; i < 5; i++) {
-        delete shopSlots[i];
         shopSlots[i] = nullptr;
     }
     for (Item* item : itemBench) {
@@ -666,6 +842,9 @@ bool GameManager::loadGame(const QString& filePath) {
     playerHp = root["playerHp"].toInt(100);
     enemyHp = root["enemyHp"].toInt(100);
     battleResultStr = root["battleResult"].toString("NONE");
+    winStreak = root["winStreak"].toInt(0);
+    loseStreak = root["loseStreak"].toInt(0);
+    interestGold = 0;
     resultDisplayTimer = 0;
 
     QJsonObject playerObj = root["player"].toObject();
@@ -695,7 +874,12 @@ bool GameManager::loadGame(const QString& filePath) {
         }
 
         for (const QJsonValue& value : obj["equippedItems"].toArray()) {
-            Item* item = createItemByName(value.toObject()["type"].toString().toStdString());
+            QJsonObject itemObj = value.toObject();
+            QString typeStr = itemObj["type"].toString();
+            // 高级装备从 "name" 字段获取具体子类名，基础装备用 "type" 字段
+            QString lookupKey = (typeStr == "Advanced" && itemObj.contains("name"))
+                                ? itemObj["name"].toString() : typeStr;
+            Item* item = createItemByName(lookupKey.toStdString());
             unit->equippedItems.push_back(item);
         }
         return unit;
@@ -708,16 +892,18 @@ bool GameManager::loadGame(const QString& filePath) {
         int x = obj["x"].toInt();
         int y = obj["y"].toInt();
 
-        if (area == "board" && x >= 0 && x < LENGTH && y >= 0 && y < WIDTH) {
+        if (area == "board" && board.isValidPosition(x, y)) {
             unit->x = x;
             unit->y = y;
             unit->isBench = false;
-            board[x][y] = unit;
+            board.addUnit(x, y, unit);
+            registerUnit(unit);
         } else if (area == "bench" && x >= 0 && x < BENCHSIZE) {
             unit->x = x;
             unit->y = -1;
             unit->isBench = true;
             bench[x] = unit;
+            registerUnit(unit);
         } else {
             delete unit;
         }
@@ -725,7 +911,11 @@ bool GameManager::loadGame(const QString& filePath) {
 
     for (const QJsonValue& value : root["itemBench"].toArray()) {
         if ((int)itemBench.size() >= MAX_ITEM_BENCH) break;
-        itemBench.push_back(createItemByName(value.toObject()["type"].toString().toStdString()));
+        QJsonObject itemObj = value.toObject();
+        QString typeStr = itemObj["type"].toString();
+        QString lookupKey = (typeStr == "Advanced" && itemObj.contains("name"))
+                            ? itemObj["name"].toString() : typeStr;
+        itemBench.push_back(createItemByName(lookupKey.toStdString()));
     }
 
     for (const QJsonValue& value : root["shop"].toArray()) {
@@ -741,4 +931,40 @@ bool GameManager::loadGame(const QString& filePath) {
 
     updateActiveTraits();
     return true;
+}
+
+// ==================== 高级装备钩子实现 ====================
+
+// 战斗开始时，遍历我方上阵单位的装备，触发 onBattleStart
+void GameManager::triggerItemCallbacks_BattleStart() {
+    for (Unit* u : allUnits) {
+        if (!u || u->isBench || u->owner != Owner::PlayerCtrl) continue;
+        for (Item* item : u->equippedItems) {
+            AdvancedItem* adv = dynamic_cast<AdvancedItem*>(item);
+            if (adv) adv->onBattleStart(u, this);
+        }
+    }
+}
+
+// 每帧遍历所有存活单位装备，触发 onTick（传入当前 battleFrame）
+void GameManager::triggerItemCallbacks_Tick() {
+    for (Unit* u : allUnits) {
+        if (!u || u->isBench || !u->isAlive()) continue;
+        for (Item* item : u->equippedItems) {
+            AdvancedItem* adv = dynamic_cast<AdvancedItem*>(item);
+            if (adv) adv->onTick(u, this, battleFrame);
+        }
+    }
+}
+
+// 单位死亡时检查装备复活钩子（如复活甲），返回 true 表示复活成功
+bool GameManager::triggerItemCallbacks_Death(Unit* u) {
+    if (!u) return false;
+    bool revived = false;
+    for (Item* item : u->equippedItems) {
+        AdvancedItem* adv = dynamic_cast<AdvancedItem*>(item);
+        if (adv) adv->onDeath(u, this, revived);
+        if (revived) break;
+    }
+    return revived;
 }
